@@ -300,11 +300,14 @@ fn handle_search_mode(app: &mut App, key: KeyEvent) {
 
 fn handle_provider_popup_mode(app: &mut App, key: KeyEvent) {
     let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+    let shift = key.modifiers.contains(KeyModifiers::SHIFT);
     match key.code {
         KeyCode::Esc => app.close_provider_popup(),
 
-        KeyCode::Up => app.provider_popup_up(),
-        KeyCode::Down => app.provider_popup_down(),
+        KeyCode::Up if shift => app.provider_popup_up(25),
+        KeyCode::Down if shift => app.provider_popup_down(25),
+        KeyCode::Up => app.provider_popup_up(1),
+        KeyCode::Down => app.provider_popup_down(1),
 
         // Space toggles too (provider names never contain spaces).
         KeyCode::Enter | KeyCode::Char(' ') => app.provider_popup_toggle(),

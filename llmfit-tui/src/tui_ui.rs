@@ -2889,7 +2889,7 @@ fn status_keys_and_mode(app: &App) -> (String, String) {
             "PLAN".to_string(),
         ),
         InputMode::ProviderPopup => (
-            "  ↑↓/jk:navigate  Space:toggle  a:all/none  Esc:close".to_string(),
+            "  ↑↓:navigate (+Shift:speed up)  Space:toggle  a:all/none  Esc:close".to_string(),
             "PROVIDERS".to_string(),
         ),
         InputMode::UseCasePopup => (

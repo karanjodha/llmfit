@@ -9,8 +9,9 @@ use llmfit_core::providers::{
 use llmfit_core::quality;
 
 use std::collections::{HashMap, HashSet};
+use std::ops::Add;
 use std::sync::mpsc;
-use std::thread;
+use std::{cmp, thread};
 
 use ratatui::widgets::TableState;
 
@@ -2303,16 +2304,16 @@ impl App {
         self.input_mode = InputMode::Normal;
     }
 
-    pub fn provider_popup_up(&mut self) {
+    pub fn provider_popup_up(&mut self, step: usize) {
         if self.provider_cursor > 0 {
-            self.provider_cursor -= 1;
+            self.provider_cursor = self.provider_cursor.saturating_sub(step);
         }
     }
 
-    pub fn provider_popup_down(&mut self) {
+    pub fn provider_popup_down(&mut self, step: usize) {
         let len = self.provider_filtered_indices().len();
         if self.provider_cursor + 1 < len {
-            self.provider_cursor += 1;
+            self.provider_cursor = cmp::min(len - 1, self.provider_cursor + step);
         }
     }
 
