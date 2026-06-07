@@ -569,28 +569,22 @@ fn handle_download_manager_mode(app: &mut App, key: KeyEvent) {
                 app.dm_editing_dir = false;
             }
             KeyCode::Backspace => {
-                if app.dm_dir_cursor > 0 {
-                    app.dm_dir_cursor -= 1;
-                    app.dm_dir_input.remove(app.dm_dir_cursor);
-                }
+                app.dm_dir_backspace();
+            }
+            KeyCode::Delete => {
+                app.dm_dir_delete();
             }
             KeyCode::Left => {
-                if app.dm_dir_cursor > 0 {
-                    app.dm_dir_cursor -= 1;
-                }
+                app.dm_dir_cursor_left();
             }
             KeyCode::Right => {
-                if app.dm_dir_cursor < app.dm_dir_input.len() {
-                    app.dm_dir_cursor += 1;
-                }
+                app.dm_dir_cursor_right();
             }
             KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                app.dm_dir_input.clear();
-                app.dm_dir_cursor = 0;
+                app.dm_dir_clear();
             }
             KeyCode::Char(c) => {
-                app.dm_dir_input.insert(app.dm_dir_cursor, c);
-                app.dm_dir_cursor += 1;
+                app.insert_dm_dir_char(c);
             }
             _ => {}
         }

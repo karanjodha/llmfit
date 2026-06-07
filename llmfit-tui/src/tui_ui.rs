@@ -22,6 +22,8 @@ use llmfit_core::providers;
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 
+const DM_MODELS_DIR_LABEL: &str = "  Models dir:  ";
+
 pub fn draw(frame: &mut Frame, app: &mut App) {
     let tc = app.theme.colors();
 
@@ -348,6 +350,12 @@ fn visible_search_query(query: &str, cursor_position: usize, width: usize) -> (S
         .min(width.saturating_sub(1)) as u16;
 
     (visible, cursor_offset)
+}
+
+fn visible_dm_dir_input(input: &str, cursor: usize, inner_width: u16) -> (String, u16) {
+    let label_width = UnicodeWidthStr::width(DM_MODELS_DIR_LABEL) as u16;
+    let input_width = inner_width.saturating_sub(label_width) as usize;
+    visible_search_query(input, cursor, input_width)
 }
 
 fn floor_grapheme_boundary(value: &str, index: usize) -> usize {
@@ -3909,7 +3917,10 @@ fn draw_downloads(frame: &mut Frame, app: &App, area: Rect, tc: &ThemeColors) {
             vertical: 1,
             horizontal: 1,
         });
-        let cursor_x = inner.x + 14 + app.dm_dir_cursor as u16;
+        let label_width = UnicodeWidthStr::width(DM_MODELS_DIR_LABEL) as u16;
+        let (_, cursor_offset) =
+            visible_dm_dir_input(&app.dm_dir_input, app.dm_dir_cursor, inner.width);
+        let cursor_x = inner.x + label_width + cursor_offset;
         let cursor_y = inner.y;
         if cursor_x < inner.x + inner.width {
             frame.set_cursor_position((cursor_x, cursor_y));
@@ -3980,23 +3991,22 @@ fn draw_dm_config(frame: &mut Frame, app: &App, area: Rect, tc: &ThemeColors) {
         .border_style(border_style)
         .title(" Config ");
 
-    let dir_display = if app.dm_editing_dir {
-        app.dm_dir_input.as_str()
+    let visible_dir = if app.dm_editing_dir {
+        let inner_width = area.width.saturating_sub(2);
+        visible_dm_dir_input(&app.dm_dir_input, app.dm_dir_cursor, inner_width).0
     } else {
-        // Show current models dir from the llamacpp provider
-        // We use the public function as a fallback display
-        ""
+        String::new()
     };
 
     let line = if app.dm_editing_dir {
         Line::from(vec![
-            Span::styled("  Models dir:  ", Style::default().fg(tc.muted)),
-            Span::styled(dir_display, Style::default().fg(tc.fg)),
+            Span::styled(DM_MODELS_DIR_LABEL, Style::default().fg(tc.muted)),
+            Span::styled(visible_dir, Style::default().fg(tc.fg)),
             Span::styled("█", Style::default().fg(tc.accent)),
         ])
     } else {
         Line::from(vec![
-            Span::styled("  Models dir:  ", Style::default().fg(tc.muted)),
+            Span::styled(DM_MODELS_DIR_LABEL, Style::default().fg(tc.muted)),
             Span::styled(
                 app.llamacpp_models_dir().display().to_string(),
                 Style::default().fg(tc.fg),
@@ -5360,6 +5370,16 @@ mod tests {
         assert_eq!(
             visible_search_query("你好世界abc", "你好世界abc".len(), 6),
             ("界abc".to_string(), 5)
+        );
+    }
+
+    #[test]
+    fn visible_dm_dir_input_keeps_unicode_cursor_visible() {
+        let input = "/tmp/模型/一二三四";
+
+        assert_eq!(
+            visible_dm_dir_input(input, input.len(), (DM_MODELS_DIR_LABEL.len() + 8) as u16),
+            ("二三四".to_string(), 6)
         );
     }
 }

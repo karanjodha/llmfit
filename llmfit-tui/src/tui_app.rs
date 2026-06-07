@@ -1789,6 +1789,47 @@ impl App {
         self.dm_editing_dir = true;
     }
 
+    pub fn insert_dm_dir_char(&mut self, c: char) {
+        self.dm_dir_cursor = floor_char_boundary(&self.dm_dir_input, self.dm_dir_cursor);
+        self.dm_dir_input.insert(self.dm_dir_cursor, c);
+        self.dm_dir_cursor += c.len_utf8();
+    }
+
+    pub fn dm_dir_backspace(&mut self) {
+        self.dm_dir_cursor = floor_char_boundary(&self.dm_dir_input, self.dm_dir_cursor);
+        if self.dm_dir_cursor > 0 {
+            let prev = previous_grapheme_boundary(&self.dm_dir_input, self.dm_dir_cursor);
+            self.dm_dir_input.drain(prev..self.dm_dir_cursor);
+            self.dm_dir_cursor = prev;
+        }
+    }
+
+    pub fn dm_dir_delete(&mut self) {
+        self.dm_dir_cursor = floor_char_boundary(&self.dm_dir_input, self.dm_dir_cursor);
+        if self.dm_dir_cursor < self.dm_dir_input.len() {
+            let next = next_grapheme_boundary(&self.dm_dir_input, self.dm_dir_cursor);
+            self.dm_dir_input.drain(self.dm_dir_cursor..next);
+        }
+    }
+
+    pub fn dm_dir_cursor_left(&mut self) {
+        if self.dm_dir_cursor > 0 {
+            self.dm_dir_cursor = previous_grapheme_boundary(&self.dm_dir_input, self.dm_dir_cursor);
+        }
+    }
+
+    pub fn dm_dir_cursor_right(&mut self) {
+        self.dm_dir_cursor = floor_char_boundary(&self.dm_dir_input, self.dm_dir_cursor);
+        if self.dm_dir_cursor < self.dm_dir_input.len() {
+            self.dm_dir_cursor = next_grapheme_boundary(&self.dm_dir_input, self.dm_dir_cursor);
+        }
+    }
+
+    pub fn dm_dir_clear(&mut self) {
+        self.dm_dir_input.clear();
+        self.dm_dir_cursor = 0;
+    }
+
     pub fn apply_download_dir(&mut self) {
         let path = std::path::PathBuf::from(&self.dm_dir_input);
         if let Err(e) = std::fs::create_dir_all(&path) {
@@ -4287,7 +4328,30 @@ fn command_exists(name: &str) -> bool {
 mod tests {
     use super::*;
     use llmfit_core::fit::{InferenceRuntime, RunMode, ScoreComponents};
+    use llmfit_core::hardware::GpuBackend;
     use llmfit_core::models::{LlmModel, ModelFormat, UseCase};
+
+    fn test_app() -> App {
+        App::with_specs_and_context(
+            SystemSpecs {
+                total_ram_gb: 16.0,
+                available_ram_gb: 12.0,
+                total_cpu_cores: 8,
+                cpu_name: "Test CPU".to_string(),
+                has_gpu: false,
+                gpu_vram_gb: None,
+                total_gpu_vram_gb: None,
+                gpu_name: None,
+                gpu_count: 0,
+                unified_memory: false,
+                backend: GpuBackend::CpuX86,
+                gpus: Vec::new(),
+                cluster_mode: false,
+                cluster_node_count: 0,
+            },
+            None,
+        )
+    }
 
     fn test_model(name: &str) -> LlmModel {
         LlmModel {
@@ -4411,5 +4475,69 @@ mod tests {
 
         assert_eq!(next_grapheme_boundary(query, after_a), after_ni);
         assert_eq!(previous_grapheme_boundary(query, after_ni), after_a);
+    }
+
+    #[test]
+    fn download_dir_input_handles_multibyte_text_without_invalid_boundaries() {
+        let mut app = test_app();
+
+        app.insert_dm_dir_char('模');
+        app.insert_dm_dir_char('型');
+        app.insert_dm_dir_char('一');
+
+        assert_eq!(app.dm_dir_input, "模型一");
+        assert_eq!(app.dm_dir_cursor, "模型一".len());
+
+        app.dm_dir_cursor_left();
+        assert_eq!(app.dm_dir_cursor, "模型".len());
+
+        app.insert_dm_dir_char('二');
+        assert_eq!(app.dm_dir_input, "模型二一");
+        assert_eq!(app.dm_dir_cursor, "模型二".len());
+
+        app.dm_dir_backspace();
+        assert_eq!(app.dm_dir_input, "模型一");
+        assert_eq!(app.dm_dir_cursor, "模型".len());
+    }
+
+    #[test]
+    fn download_dir_input_deletes_whole_emoji_graphemes() {
+        let mut app = test_app();
+        app.dm_dir_input = "a👩‍💻b".to_string();
+        app.dm_dir_cursor = "a".len();
+
+        app.dm_dir_delete();
+        assert_eq!(app.dm_dir_input, "ab");
+        assert_eq!(app.dm_dir_cursor, "a".len());
+
+        app.insert_dm_dir_char('🚀');
+        assert_eq!(app.dm_dir_input, "a🚀b");
+        assert_eq!(app.dm_dir_cursor, "a🚀".len());
+
+        app.dm_dir_backspace();
+        assert_eq!(app.dm_dir_input, "ab");
+        assert_eq!(app.dm_dir_cursor, "a".len());
+    }
+
+    #[test]
+    fn download_dir_input_repairs_non_boundary_cursor_before_editing() {
+        let mut app = test_app();
+        app.dm_dir_input = "一a".to_string();
+        app.dm_dir_cursor = 1;
+
+        app.insert_dm_dir_char('二');
+        assert_eq!(app.dm_dir_input, "二一a");
+        assert_eq!(app.dm_dir_cursor, "二".len());
+    }
+
+    #[test]
+    fn download_dir_backspace_repairs_non_boundary_cursor_before_editing() {
+        let mut app = test_app();
+        app.dm_dir_input = "一a".to_string();
+        app.dm_dir_cursor = 2;
+
+        app.dm_dir_backspace();
+        assert_eq!(app.dm_dir_input, "一a");
+        assert_eq!(app.dm_dir_cursor, 0);
     }
 }
