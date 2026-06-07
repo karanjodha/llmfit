@@ -2560,21 +2560,32 @@ fn draw_provider_popup(frame: &mut Frame, app: &App, tc: &ThemeColors) {
 
     // Search input row.
     let mut lines: Vec<Line> = Vec::with_capacity(inner_height + 1);
+    let search_prefix = " / ";
+    let search_inner_width = popup_width.saturating_sub(2) as usize;
+    let search_query_width = search_inner_width.saturating_sub(search_prefix.len());
+    let (visible_provider_search, provider_cursor_offset) = visible_search_query(
+        &app.provider_search,
+        app.provider_search_cursor_position,
+        search_query_width,
+    );
     let search_display = if app.provider_search.is_empty() {
-        Span::styled(
-            " / type to filter",
-            Style::default().fg(tc.muted).add_modifier(Modifier::ITALIC),
-        )
+        Line::from(vec![
+            Span::styled(search_prefix, Style::default().fg(tc.fg)),
+            Span::styled(
+                "type to filter",
+                Style::default().fg(tc.muted).add_modifier(Modifier::ITALIC),
+            ),
+        ])
     } else {
-        Span::styled(
-            format!(" / {}", app.provider_search),
-            Style::default().fg(tc.fg).add_modifier(Modifier::BOLD),
-        )
+        Line::from(vec![
+            Span::styled(search_prefix, Style::default().fg(tc.fg)),
+            Span::styled(
+                visible_provider_search,
+                Style::default().fg(tc.fg).add_modifier(Modifier::BOLD),
+            ),
+        ])
     };
-    lines.push(Line::from(vec![
-        search_display,
-        Span::styled("_", Style::default().fg(tc.accent_secondary)),
-    ]));
+    lines.push(search_display);
 
     if filtered.is_empty() {
         lines.push(Line::from(Span::styled(
@@ -2665,6 +2676,15 @@ fn draw_provider_popup(frame: &mut Frame, app: &App, tc: &ThemeColors) {
 
     let paragraph = Paragraph::new(lines).block(block);
     frame.render_widget(paragraph, popup_area);
+
+    let cursor_x = popup_area.x
+        + 1
+        + search_prefix.len() as u16
+        + provider_cursor_offset.min(search_query_width as u16);
+    let cursor_y = popup_area.y + 1;
+    if cursor_x < popup_area.x + popup_area.width.saturating_sub(1) {
+        frame.set_cursor_position((cursor_x, cursor_y));
+    }
 }
 
 fn draw_use_case_popup(frame: &mut Frame, app: &App, tc: &ThemeColors) {

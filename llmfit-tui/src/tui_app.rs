@@ -46,6 +46,32 @@ fn next_grapheme_boundary(value: &str, index: usize) -> usize {
         .unwrap_or_else(|| value.len())
 }
 
+fn insert_ascii_graphic_input(value: &mut String, cursor: &mut usize, c: char) {
+    if !c.is_ascii_graphic() {
+        return;
+    }
+
+    *cursor = floor_char_boundary(value, *cursor);
+    value.insert(*cursor, c);
+    *cursor += c.len_utf8();
+}
+
+fn backspace_grapheme_input(value: &mut String, cursor: &mut usize) {
+    if *cursor > 0 {
+        let prev = previous_grapheme_boundary(value, *cursor);
+        value.drain(prev..*cursor);
+        *cursor = prev;
+    }
+}
+
+fn delete_grapheme_input(value: &mut String, cursor: usize) {
+    if cursor < value.len() {
+        let cursor = floor_char_boundary(value, cursor);
+        let next = next_grapheme_boundary(value, cursor);
+        value.drain(cursor..next);
+    }
+}
+
 /// Messages sent from background provider-detection threads back to the main TUI.
 pub enum ProviderDetectionMsg {
     Ollama {
@@ -569,6 +595,7 @@ pub struct App {
     // Provider popup
     pub provider_cursor: usize,
     pub provider_search: String,
+    pub provider_search_cursor_position: usize,
     pub use_case_cursor: usize,
     pub capability_cursor: usize,
     pub download_provider_cursor: usize,
@@ -1068,6 +1095,7 @@ impl App {
             plan_error: None,
             provider_cursor: 0,
             provider_search: String::new(),
+            provider_search_cursor_position: 0,
             use_case_cursor: 0,
             capability_cursor: 0,
             download_provider_cursor: 0,
@@ -2335,12 +2363,14 @@ impl App {
     pub fn open_provider_popup(&mut self) {
         self.input_mode = InputMode::ProviderPopup;
         self.provider_search.clear();
+        self.provider_search_cursor_position = 0;
         self.provider_cursor = 0;
     }
 
     pub fn close_provider_popup(&mut self) {
         self.input_mode = InputMode::Normal;
         self.provider_search.clear();
+        self.provider_search_cursor_position = 0;
     }
 
     /// Indices into `self.providers` that match the current fuzzy search query,
@@ -2355,17 +2385,57 @@ impl App {
     }
 
     pub fn provider_search_input(&mut self, c: char) {
-        self.provider_search.push(c);
+        insert_ascii_graphic_input(
+            &mut self.provider_search,
+            &mut self.provider_search_cursor_position,
+            c,
+        );
         self.clamp_provider_cursor();
     }
 
     pub fn provider_search_backspace(&mut self) {
-        self.provider_search.pop();
+        backspace_grapheme_input(
+            &mut self.provider_search,
+            &mut self.provider_search_cursor_position,
+        );
         self.clamp_provider_cursor();
+    }
+
+    pub fn provider_search_delete(&mut self) {
+        delete_grapheme_input(
+            &mut self.provider_search,
+            self.provider_search_cursor_position,
+        );
+        self.clamp_provider_cursor();
+    }
+
+    pub fn provider_search_cursor_left(&mut self) {
+        if self.provider_search_cursor_position > 0 {
+            self.provider_search_cursor_position = previous_grapheme_boundary(
+                &self.provider_search,
+                self.provider_search_cursor_position,
+            );
+        }
+    }
+
+    pub fn provider_search_cursor_right(&mut self) {
+        if self.provider_search_cursor_position < self.provider_search.len() {
+            self.provider_search_cursor_position =
+                next_grapheme_boundary(&self.provider_search, self.provider_search_cursor_position);
+        }
+    }
+
+    pub fn provider_search_cursor_home(&mut self) {
+        self.provider_search_cursor_position = 0;
+    }
+
+    pub fn provider_search_cursor_end(&mut self) {
+        self.provider_search_cursor_position = self.provider_search.len();
     }
 
     pub fn provider_search_clear(&mut self) {
         self.provider_search.clear();
+        self.provider_search_cursor_position = 0;
         self.clamp_provider_cursor();
     }
 
@@ -4455,6 +4525,35 @@ mod tests {
         // Char not present
         assert!(!fuzzy_match("ollamax", "Ollama"));
         assert!(!fuzzy_match("z", "Anthropic"));
+    }
+
+    #[test]
+    fn ascii_graphic_input_inserts_at_cursor_and_rejects_non_ascii() {
+        let mut value = "Ollma".to_string();
+        let mut cursor = "Oll".len();
+
+        insert_ascii_graphic_input(&mut value, &mut cursor, 'a');
+        assert_eq!(value, "Ollama");
+        assert_eq!(cursor, "Olla".len());
+
+        insert_ascii_graphic_input(&mut value, &mut cursor, '你');
+        insert_ascii_graphic_input(&mut value, &mut cursor, ' ');
+        assert_eq!(value, "Ollama");
+        assert_eq!(cursor, "Olla".len());
+    }
+
+    #[test]
+    fn grapheme_input_backspace_and_delete_edit_at_cursor() {
+        let mut value = "LLaamCpp".to_string();
+        let mut cursor = "LLa".len();
+
+        backspace_grapheme_input(&mut value, &mut cursor);
+        assert_eq!(value, "LLamCpp");
+        assert_eq!(cursor, "LL".len());
+
+        delete_grapheme_input(&mut value, cursor);
+        assert_eq!(value, "LLmCpp");
+        assert_eq!(cursor, "LL".len());
     }
 
     #[test]
