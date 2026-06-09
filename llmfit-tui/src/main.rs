@@ -2599,7 +2599,30 @@ fn main() {
             Commands::Search { query } => {
                 let db = ModelDatabase::new();
                 let results = db.find_model(&query);
-                display::display_search_results(&results, &query);
+                if results.is_empty() {
+                    // Fallback: search HuggingFace directly for GGUF models
+                    use llmfit_core::providers::LlamaCppProvider;
+                    println!(
+                        "\nNo local models found matching '{}'. Searching HuggingFace...\n",
+                        query
+                    );
+                    let hf_results = LlamaCppProvider::search_hf_gguf(&query);
+                    if hf_results.is_empty() {
+                        println!("No models found matching '{}'.", query);
+                    } else {
+                        println!("{:<50} Type", "Repository");
+                        println!("{}", "-".repeat(65));
+                        for (id, desc) in hf_results.iter().take(20) {
+                            println!("{:<50} {}", id, desc);
+                        }
+                        println!("\nTo download: llmfit download <repository>");
+                        println!(
+                            "Tip: run 'llmfit update' to add trending models to the local index."
+                        );
+                    }
+                } else {
+                    display::display_search_results(&results, &query);
+                }
             }
 
             Commands::Info { model } => {

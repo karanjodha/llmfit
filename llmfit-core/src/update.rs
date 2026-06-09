@@ -428,8 +428,15 @@ fn hf_get_list(sort: &str, limit: usize, token: Option<&str>) -> Result<Vec<HfAp
 /// (`num_hidden_layers`, `num_attention_heads`, `num_key_value_heads`,
 /// `head_dim`). The fetch is best-effort and silently degrades to `None`.
 fn map_to_llm_model(hf: HfApiModel, token: Option<&str>) -> Option<LlmModel> {
-    let is_tg = hf.pipeline_tag.as_deref() == Some("text-generation")
-        || hf.tags.iter().any(|t| t == "text-generation");
+    let accepted_pipelines = ["text-generation", "image-text-to-text", "any-to-any"];
+    let is_tg = hf
+        .pipeline_tag
+        .as_deref()
+        .is_some_and(|p| accepted_pipelines.contains(&p))
+        || hf
+            .tags
+            .iter()
+            .any(|t| accepted_pipelines.contains(&t.as_str()));
     if !is_tg {
         return None;
     }
