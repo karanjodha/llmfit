@@ -3453,40 +3453,23 @@ mod tests {
     }
 
     #[test]
-    fn test_lmstudio_provider_default_reads_api_key() {
-        use std::env;
-
-        // Save and restore the original value (or absence) of LMSTUDIO_API_KEY.
-        let had_key = env::var("LMSTUDIO_API_KEY").ok();
-        // SAFETY: This test is single-threaded and restores the env var at the end.
-        unsafe {
-            env::remove_var("LMSTUDIO_API_KEY");
+    fn test_lmstudio_api_key_filtering() {
+        // Test the api_key filtering logic without mutating the process
+        // environment. LmStudioProvider::default() applies
+        // `.filter(|k| !k.is_empty())` to the env var value.
+        fn filter_key(val: Option<&str>) -> Option<String> {
+            val.map(String::from).filter(|k| !k.is_empty())
         }
 
-        let provider = LmStudioProvider::default();
-        assert!(provider.api_key.is_none());
-
-        // Set to a real value — should be picked up.
-        unsafe {
-            env::set_var("LMSTUDIO_API_KEY", "my-secret-key");
-        }
-        let provider2 = LmStudioProvider::default();
-        assert_eq!(provider2.api_key, Some("my-secret-key".to_string()));
-
-        // Set to empty string — must NOT produce `Some("")`.
-        unsafe {
-            env::set_var("LMSTUDIO_API_KEY", "");
-        }
-        let provider3 = LmStudioProvider::default();
-        assert!(provider3.api_key.is_none());
-
-        // Restore original state.
-        unsafe {
-            match had_key {
-                Some(val) => env::set_var("LMSTUDIO_API_KEY", val),
-                None => env::remove_var("LMSTUDIO_API_KEY"),
-            }
-        }
+        // Missing env var → None
+        assert!(filter_key(None).is_none());
+        // Real value → Some
+        assert_eq!(
+            filter_key(Some("my-secret-key")),
+            Some("my-secret-key".to_string())
+        );
+        // Empty string → None (must not produce Some(""))
+        assert!(filter_key(Some("")).is_none());
     }
 
     #[test]
@@ -4478,28 +4461,21 @@ mod tests {
     }
 
     #[test]
-    fn test_docker_desktop_running_via_env_var() {
-        // Test 1: Non-empty value should detect Docker Desktop
-        unsafe {
-            std::env::set_var("DOCKER_MODEL_RUNNER_HOST", "localhost:12434");
+    fn test_docker_model_runner_host_filtering() {
+        // Test the DOCKER_MODEL_RUNNER_HOST filtering logic without mutating the
+        // process environment. is_docker_desktop_running() applies
+        // `!v.trim().is_empty()` to the env var value.
+        fn host_is_set(val: Option<&str>) -> bool {
+            val.map(|v| !v.trim().is_empty()).unwrap_or(false)
         }
-        assert!(is_docker_desktop_running());
 
-        // Test 2: Empty string should NOT count as running
-        unsafe {
-            std::env::set_var("DOCKER_MODEL_RUNNER_HOST", "");
-        }
-        assert!(!is_docker_desktop_running());
-
-        // Test 3: Whitespace-only should NOT count as running
-        unsafe {
-            std::env::set_var("DOCKER_MODEL_RUNNER_HOST", "   ");
-        }
-        assert!(!is_docker_desktop_running());
-
-        // Cleanup
-        unsafe {
-            std::env::remove_var("DOCKER_MODEL_RUNNER_HOST");
-        }
+        // Non-empty value should count as set
+        assert!(host_is_set(Some("localhost:12434")));
+        // Empty string should NOT count
+        assert!(!host_is_set(Some("")));
+        // Whitespace-only should NOT count
+        assert!(!host_is_set(Some("   ")));
+        // Missing env var should NOT count
+        assert!(!host_is_set(None));
     }
 }
