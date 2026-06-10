@@ -18,7 +18,6 @@ use crate::tui_app::{
 };
 use llmfit_core::fit::{FitLevel, ModelFit, SortColumn};
 use llmfit_core::hardware::is_running_in_wsl;
-use llmfit_core::providers;
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 
@@ -135,7 +134,7 @@ fn draw_system_bar(frame: &mut Frame, app: &App, area: Rect, tc: &ThemeColors) {
     };
 
     let ollama_info = if app.ollama_available {
-        format!("Ollama: ✓ ({} installed)", app.ollama_installed_count)
+        format!("Ollama: ✓ ({} installed)", app.installed.ollama_count)
     } else {
         "Ollama: ✗".to_string()
     };
@@ -146,15 +145,15 @@ fn draw_system_bar(frame: &mut Frame, app: &App, area: Rect, tc: &ThemeColors) {
     };
 
     let mlx_info = if app.mlx_available {
-        format!("MLX: ✓ ({} installed)", app.mlx_installed.len())
-    } else if !app.mlx_installed.is_empty() {
-        format!("MLX: ({} cached)", app.mlx_installed.len())
+        format!("MLX: ✓ ({} installed)", app.installed.mlx.len())
+    } else if !app.installed.mlx.is_empty() {
+        format!("MLX: ({} cached)", app.installed.mlx.len())
     } else {
         "MLX: ✗".to_string()
     };
     let mlx_color = if app.mlx_available {
         tc.good
-    } else if !app.mlx_installed.is_empty() {
+    } else if !app.installed.mlx.is_empty() {
         tc.warning
     } else {
         tc.muted
@@ -162,25 +161,25 @@ fn draw_system_bar(frame: &mut Frame, app: &App, area: Rect, tc: &ThemeColors) {
 
     let llamacpp_info = if app.llamacpp_available {
         if app.llamacpp_detection_hint.is_empty() {
-            format!("llama.cpp: ✓ ({} models)", app.llamacpp_installed_count)
+            format!("llama.cpp: ✓ ({} models)", app.installed.llamacpp_count)
         } else {
             format!("llama.cpp: ✓ ({})", app.llamacpp_detection_hint)
         }
-    } else if !app.llamacpp_installed.is_empty() {
-        format!("llama.cpp: ({} cached)", app.llamacpp_installed_count)
+    } else if !app.installed.llamacpp.is_empty() {
+        format!("llama.cpp: ({} cached)", app.installed.llamacpp_count)
     } else {
         format!("llama.cpp: ✗ ({})", app.llamacpp_detection_hint)
     };
     let llamacpp_color = if app.llamacpp_available {
         tc.good
-    } else if !app.llamacpp_installed.is_empty() {
+    } else if !app.installed.llamacpp.is_empty() {
         tc.warning
     } else {
         tc.muted
     };
 
     let docker_mr_info = if app.docker_mr_available {
-        format!("Docker: ✓ ({} models)", app.docker_mr_installed_count)
+        format!("Docker: ✓ ({} models)", app.installed.docker_mr_count)
     } else {
         "Docker: ✗".to_string()
     };
@@ -191,7 +190,7 @@ fn draw_system_bar(frame: &mut Frame, app: &App, area: Rect, tc: &ThemeColors) {
     };
 
     let lmstudio_info = if app.lmstudio_available {
-        format!("LM Studio: ✓ ({} models)", app.lmstudio_installed_count)
+        format!("LM Studio: ✓ ({} models)", app.installed.lmstudio_count)
     } else {
         "LM Studio: ✗".to_string()
     };
@@ -202,7 +201,7 @@ fn draw_system_bar(frame: &mut Frame, app: &App, area: Rect, tc: &ThemeColors) {
     };
 
     let vllm_info = if app.vllm_available {
-        format!("vLLM: ✓ ({} models)", app.vllm_installed_count)
+        format!("vLLM: ✓ ({} models)", app.installed.vllm_count)
     } else {
         "vLLM: ✗".to_string()
     };
@@ -1779,30 +1778,7 @@ fn draw_detail(frame: &mut Frame, app: &App, area: Rect, tc: &ThemeColors) {
         Line::from(vec![
             Span::styled("  Installed:   ", Style::default().fg(tc.muted)),
             {
-                let mut installed_providers = Vec::new();
-                if providers::is_model_installed(&fit.model.name, &app.ollama_installed) {
-                    installed_providers.push("Ollama");
-                }
-                if providers::is_model_installed_mlx(&fit.model.name, &app.mlx_installed) {
-                    installed_providers.push("MLX");
-                }
-                if providers::is_model_installed_llamacpp(&fit.model.name, &app.llamacpp_installed)
-                {
-                    installed_providers.push("llama.cpp");
-                }
-                if providers::is_model_installed_docker_mr(
-                    &fit.model.name,
-                    &app.docker_mr_installed,
-                ) {
-                    installed_providers.push("Docker");
-                }
-                if providers::is_model_installed_lmstudio(&fit.model.name, &app.lmstudio_installed)
-                {
-                    installed_providers.push("LM Studio");
-                }
-                if providers::is_model_installed_vllm(&fit.model.name, &app.vllm_installed) {
-                    installed_providers.push("vLLM");
-                }
+                let installed_providers = app.installed.installed_providers(&fit.model.name);
                 let any_available = app.ollama_available
                     || app.mlx_available
                     || app.llamacpp_available
