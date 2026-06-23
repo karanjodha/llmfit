@@ -1,6 +1,7 @@
 # Multi-stage build for llmfit
 # Stage 1: Build the Rust binary
-FROM rust:1.88-slim AS builder
+# rustc >= 1.95 required: sysinfo 0.39.x bumped its MSRV to 1.95.
+FROM rust:1.95-slim AS builder
 
 # Install build dependencies
 RUN apt-get update && apt-get install -y \
