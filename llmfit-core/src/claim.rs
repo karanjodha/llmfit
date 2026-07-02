@@ -126,9 +126,17 @@ pub fn render(model: &LlmModel, target: &ClaimTarget) -> Result<String, String> 
     // Continuation lines must sit at exactly the block scalar's content
     // indentation (first line = ind + 16) for clean YAML folding.
     let pad = format!("{ind}                ");
+    // Every optional lookup is guarded with CEL map membership: a missing
+    // attribute must mean "device does not match", not a CEL runtime error.
+    // Unguarded access errors on any device without the attribute (the cpu0
+    // fallback, unindexed virtual display adapters on servers with BMC
+    // framebuffers) and can wrongly disqualify allocations.
     let cel = format!(
-        "device.capacity['{d}'].memory.compareTo(quantity('{mem}Gi')) >= 0 &&\n\
+        "'memory' in device.capacity['{d}'] &&\n\
+         {pad}device.capacity['{d}'].memory.compareTo(quantity('{mem}Gi')) >= 0 &&\n\
+         {pad}'memoryBandwidthGBs' in device.attributes['{d}'] &&\n\
          {pad}device.attributes['{d}'].memoryBandwidthGBs >= {bw} &&\n\
+         {pad}'healthy' in device.attributes['{d}'] &&\n\
          {pad}device.attributes['{d}'].healthy",
         d = DRIVER_DOMAIN,
         mem = b.memory_gi,
@@ -267,6 +275,24 @@ mod tests {
         assert!(y.contains("quantity('6Gi')"));
         assert!(y.contains("memoryBandwidthGBs >= 148"));
         assert!(y.contains(".healthy"));
+    }
+
+    #[test]
+    fn render_guards_every_optional_lookup() {
+        // Missing attributes must be a non-match, not a CEL runtime error:
+        // each capacity/attribute access is preceded by an `in` guard.
+        let y = render(&model("Q4_K_M", Some(6.0)), &ClaimTarget::default()).unwrap();
+        for guard in [
+            "'memory' in device.capacity['llmfit.ai']",
+            "'memoryBandwidthGBs' in device.attributes['llmfit.ai']",
+            "'healthy' in device.attributes['llmfit.ai']",
+        ] {
+            assert!(y.contains(guard), "missing guard: {guard}\n{y}");
+        }
+        // Guard must appear before the corresponding access.
+        let mem_guard = y.find("'memory' in").unwrap();
+        let mem_access = y.find(".memory.compareTo").unwrap();
+        assert!(mem_guard < mem_access);
     }
 
     #[test]
