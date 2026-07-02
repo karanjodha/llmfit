@@ -1127,6 +1127,50 @@ fn dedupe_hf_entries(entries: Vec<HfModelEntry>) -> Vec<HfModelEntry> {
     map.into_values().collect()
 }
 
+/// Map a JSON catalog entry to an [`LlmModel`], inferring capabilities and
+/// attention layout where the entry doesn't carry them explicitly.
+fn entry_to_model(e: HfModelEntry) -> LlmModel {
+    let mut model = LlmModel {
+        name: e.name,
+        provider: e.provider,
+        parameter_count: e.parameter_count,
+        parameters_raw: e.parameters_raw,
+        min_ram_gb: e.min_ram_gb,
+        recommended_ram_gb: e.recommended_ram_gb,
+        min_vram_gb: e.min_vram_gb,
+        quantization: e.quantization,
+        context_length: e.context_length,
+        use_case: e.use_case,
+        is_moe: e.is_moe,
+        num_experts: e.num_experts,
+        active_experts: e.active_experts,
+        active_parameters: e.active_parameters,
+        release_date: e.release_date,
+        gguf_sources: e.gguf_sources,
+        capabilities: e.capabilities,
+        format: e.format,
+        num_attention_heads: e.num_attention_heads,
+        num_key_value_heads: e.num_key_value_heads,
+        num_hidden_layers: e.num_hidden_layers,
+        head_dim: e.head_dim,
+        attention_layout: None,
+        hidden_size: e.hidden_size,
+        moe_intermediate_size: e.moe_intermediate_size,
+        vocab_size: e.vocab_size,
+        shared_expert_intermediate_size: e.shared_expert_intermediate_size,
+        license: e.license,
+        architecture: e.architecture,
+    };
+    model.capabilities = Capability::infer(&model);
+    // Auto-populate attention_layout from name heuristic for known
+    // hybrid families. Explicit metadata still wins (model.attention_layout
+    // stays None until the scraper is taught to read it from config.json).
+    if model.attention_layout.is_none() {
+        model.attention_layout = infer_attention_layout_from_name(&model.name);
+    }
+    model
+}
+
 /// Parse the compile-time embedded JSON into a flat `Vec<LlmModel>`.
 fn load_embedded() -> Vec<LlmModel> {
     let entries: Vec<HfModelEntry> =
@@ -1135,48 +1179,36 @@ fn load_embedded() -> Vec<LlmModel> {
     // for the same model slug with conflicting metadata.
     dedupe_hf_entries(entries)
         .into_iter()
-        .map(|e| {
-            let mut model = LlmModel {
-                name: e.name,
-                provider: e.provider,
-                parameter_count: e.parameter_count,
-                parameters_raw: e.parameters_raw,
-                min_ram_gb: e.min_ram_gb,
-                recommended_ram_gb: e.recommended_ram_gb,
-                min_vram_gb: e.min_vram_gb,
-                quantization: e.quantization,
-                context_length: e.context_length,
-                use_case: e.use_case,
-                is_moe: e.is_moe,
-                num_experts: e.num_experts,
-                active_experts: e.active_experts,
-                active_parameters: e.active_parameters,
-                release_date: e.release_date,
-                gguf_sources: e.gguf_sources,
-                capabilities: e.capabilities,
-                format: e.format,
-                num_attention_heads: e.num_attention_heads,
-                num_key_value_heads: e.num_key_value_heads,
-                num_hidden_layers: e.num_hidden_layers,
-                head_dim: e.head_dim,
-                attention_layout: None,
-                hidden_size: e.hidden_size,
-                moe_intermediate_size: e.moe_intermediate_size,
-                vocab_size: e.vocab_size,
-                shared_expert_intermediate_size: e.shared_expert_intermediate_size,
-                license: e.license,
-                architecture: e.architecture,
-            };
-            model.capabilities = Capability::infer(&model);
-            // Auto-populate attention_layout from name heuristic for known
-            // hybrid families. Explicit metadata still wins (model.attention_layout
-            // stays None until the scraper is taught to read it from config.json).
-            if model.attention_layout.is_none() {
-                model.attention_layout = infer_attention_layout_from_name(&model.name);
-            }
-            model
-        })
+        .map(entry_to_model)
         .collect()
+}
+
+/// Full path to the user's custom model overlay file, alongside the update
+/// cache (e.g. `~/.local/share/llmfit/custom_models.json` on Linux).
+/// The `LLMFIT_CUSTOM_MODELS` env var overrides the location.
+pub fn custom_models_file() -> Option<std::path::PathBuf> {
+    if let Ok(path) = std::env::var("LLMFIT_CUSTOM_MODELS") {
+        return Some(std::path::PathBuf::from(path));
+    }
+    Some(crate::update::cache_dir()?.join("custom_models.json"))
+}
+
+/// Load user-defined models from a JSON file using the same entry schema as
+/// the embedded catalog (`hf_models.json`). Returns an error string for a
+/// present-but-invalid file so callers can warn instead of silently dropping
+/// hand-written entries; a missing file is `Ok(vec![])`.
+fn load_custom_models_from(path: &std::path::Path) -> Result<Vec<LlmModel>, String> {
+    if !path.exists() {
+        return Ok(vec![]);
+    }
+    let content = std::fs::read_to_string(path)
+        .map_err(|e| format!("cannot read {}: {e}", path.display()))?;
+    let entries: Vec<HfModelEntry> = serde_json::from_str(&content)
+        .map_err(|e| format!("invalid JSON in {}: {e}", path.display()))?;
+    Ok(dedupe_hf_entries(entries)
+        .into_iter()
+        .map(entry_to_model)
+        .collect())
 }
 
 impl ModelDatabase {
@@ -1188,23 +1220,41 @@ impl ModelDatabase {
         }
     }
 
-    /// Load the embedded model list **and** merge any locally cached models.
+    /// Load the embedded model list **and** merge user custom models and any
+    /// locally cached models.
     ///
-    /// Cached models are appended after the embedded ones; if an ID already
-    /// exists in the embedded list it is skipped to avoid duplication.
-    /// Silently ignores a missing or corrupt cache file.
+    /// Precedence: custom models (see [`custom_models_file`]) replace embedded
+    /// entries with the same canonical slug; cached models (from
+    /// `llmfit update`) are appended only for slugs not already present.
+    /// A missing cache/custom file is ignored; a *corrupt* custom file prints
+    /// a warning to stderr so hand-written entries don't vanish silently.
     pub fn new() -> Self {
         let mut models = load_embedded();
+
+        // Overlay user-defined models: same slug replaces the embedded entry,
+        // new slugs are appended.
+        if let Some(path) = custom_models_file() {
+            match load_custom_models_from(&path) {
+                Ok(custom) if !custom.is_empty() => {
+                    let custom_keys: std::collections::HashSet<String> =
+                        custom.iter().map(|m| canonical_slug(&m.name)).collect();
+                    models.retain(|m| !custom_keys.contains(&canonical_slug(&m.name)));
+                    models.extend(custom);
+                }
+                Ok(_) => {}
+                Err(e) => eprintln!("Warning: skipping custom models: {e}"),
+            }
+        }
 
         // Merge cached models (from `llmfit update`) without duplicating.
         // canonical_slug normalizes org/ prefix, case, and separators so that
         // e.g. `meta-llama/Llama-3.1-8B` and `meta-llama/llama-3.1-8b` are
         // treated as the same model.
-        let embedded_keys: std::collections::HashSet<String> =
+        let existing_keys: std::collections::HashSet<String> =
             models.iter().map(|m| canonical_slug(&m.name)).collect();
 
         for cached in crate::update::load_cache() {
-            if !embedded_keys.contains(&canonical_slug(&cached.name)) {
+            if !existing_keys.contains(&canonical_slug(&cached.name)) {
                 models.push(cached);
             }
         }
@@ -1432,6 +1482,81 @@ fn infer_heads_from_name(name: &str, params_b: f64) -> (u32, u32) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ────────────────────────────────────────────────────────────────────
+    // Custom model overlay tests
+    // ────────────────────────────────────────────────────────────────────
+
+    const CUSTOM_ENTRY_JSON: &str = r#"[{
+        "name": "acme/CustomNet-7B",
+        "provider": "acme",
+        "parameter_count": "7B",
+        "min_ram_gb": 5.0,
+        "recommended_ram_gb": 8.0,
+        "min_vram_gb": 5.0,
+        "quantization": "Q4_K_M",
+        "context_length": 32768,
+        "use_case": "Testing"
+    }]"#;
+
+    fn write_temp_json(name: &str, content: &str) -> std::path::PathBuf {
+        let path = std::env::temp_dir().join(format!("llmfit-test-{}-{name}", std::process::id()));
+        std::fs::write(&path, content).unwrap();
+        path
+    }
+
+    #[test]
+    fn test_load_custom_models_missing_file_is_empty() {
+        let path = std::path::Path::new("/nonexistent/llmfit-custom-models.json");
+        assert_eq!(load_custom_models_from(path).unwrap().len(), 0);
+    }
+
+    #[test]
+    fn test_load_custom_models_parses_minimal_entry() {
+        let path = write_temp_json("minimal.json", CUSTOM_ENTRY_JSON);
+        let models = load_custom_models_from(&path).unwrap();
+        std::fs::remove_file(&path).ok();
+
+        assert_eq!(models.len(), 1);
+        let m = &models[0];
+        assert_eq!(m.name, "acme/CustomNet-7B");
+        assert_eq!(m.context_length, 32768);
+        assert_eq!(m.quantization, "Q4_K_M");
+    }
+
+    #[test]
+    fn test_load_custom_models_invalid_json_is_error_not_empty() {
+        let path = write_temp_json("broken.json", "[{\"name\": ");
+        let result = load_custom_models_from(&path);
+        std::fs::remove_file(&path).ok();
+
+        let err = result.unwrap_err();
+        assert!(err.contains("invalid JSON"), "unexpected error: {err}");
+    }
+
+    #[test]
+    fn test_custom_overlay_replaces_embedded_entry_by_slug() {
+        // Simulate the overlay step in ModelDatabase::new() against the real
+        // embedded catalog: a custom entry whose slug matches an embedded
+        // model must replace it rather than duplicate it.
+        let mut models = load_embedded();
+        let original_len = models.len();
+        let victim = models[0].name.clone();
+
+        let json = CUSTOM_ENTRY_JSON.replace("acme/CustomNet-7B", &victim);
+        let path = write_temp_json("override.json", &json);
+        let custom = load_custom_models_from(&path).unwrap();
+        std::fs::remove_file(&path).ok();
+
+        let custom_keys: std::collections::HashSet<String> =
+            custom.iter().map(|m| canonical_slug(&m.name)).collect();
+        models.retain(|m| !custom_keys.contains(&canonical_slug(&m.name)));
+        models.extend(custom);
+
+        assert_eq!(models.len(), original_len, "override must not duplicate");
+        let replaced = models.iter().find(|m| m.name == victim).unwrap();
+        assert_eq!(replaced.use_case, "Testing");
+    }
 
     #[test]
     fn test_matches_license_filter_handles_comma_separated_model_licenses() {
