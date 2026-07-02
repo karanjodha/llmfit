@@ -141,14 +141,10 @@ type ApiResult<T> = Result<T, ApiError>;
 pub fn run_serve(
     host: &str,
     port: u16,
+    unix_socket: Option<&std::path::Path>,
     overrides: &super::HardwareOverrides,
     context_limit: Option<u32>,
 ) -> Result<(), String> {
-    let ip: IpAddr = host
-        .parse()
-        .map_err(|_| format!("invalid --host value: '{host}'"))?;
-    let addr = SocketAddr::new(ip, port);
-
     let specs = super::detect_specs(overrides);
     let db = ModelDatabase::new();
     let all_models = db.get_all_models().clone();
@@ -170,36 +166,83 @@ pub fn run_serve(
 
     let app = build_router(state);
 
-    println!("llmfit dashboard listening on http://{}/", addr);
-    println!("  API models: http://{}/api/v1/models", addr);
-    println!("  GET /health");
-    println!("  GET /api/v1/system");
-    println!("  GET /api/v1/models?limit=20&min_fit=marginal&sort=score");
-    println!("  GET /api/v1/models/top?limit=5&use_case=coding&min_fit=good");
-    println!("  GET /api/v1/models/<name>");
-
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
         .map_err(|e| format!("failed to start tokio runtime: {e}"))?;
 
-    runtime
-        .block_on(async move {
-            let listener = tokio::net::TcpListener::bind(addr)
-                .await
-                .map_err(|e| ApiError::internal(format!("bind failed on {addr}: {e}")))?;
+    match unix_socket {
+        Some(path) => {
+            #[cfg(unix)]
+            {
+                println!("llmfit dashboard listening on unix://{}", path.display());
+                println!("  GET /health");
+                println!("  GET /api/v1/system");
+                println!("  GET /api/v1/models?limit=20&min_fit=marginal&sort=score");
+                runtime
+                    .block_on(async move {
+                        if let Some(parent) = path.parent() {
+                            let _ = std::fs::create_dir_all(parent);
+                        }
+                        // A stale file from a previous instance blocks bind
+                        // (the path can outlive the process, e.g. a pod
+                        // volume across container restarts).
+                        let _ = std::fs::remove_file(path);
+                        let listener = tokio::net::UnixListener::bind(path).map_err(|e| {
+                            ApiError::internal(format!("bind failed on {}: {e}", path.display()))
+                        })?;
+                        // Same-host peers only; group-accessible, not world.
+                        use std::os::unix::fs::PermissionsExt;
+                        let _ =
+                            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o660));
+                        axum::serve(listener, app.into_make_service())
+                            .with_graceful_shutdown(async {
+                                let _ = tokio::signal::ctrl_c().await;
+                            })
+                            .await
+                            .map_err(|e| ApiError::internal(format!("server error: {e}")))
+                    })
+                    .map_err(|e| e.message)
+            }
+            #[cfg(not(unix))]
+            {
+                let _ = path;
+                Err("--unix-socket is only supported on unix platforms".to_string())
+            }
+        }
+        None => {
+            let ip: IpAddr = host
+                .parse()
+                .map_err(|_| format!("invalid --host value: '{host}'"))?;
+            let addr = SocketAddr::new(ip, port);
 
-            axum::serve(
-                listener,
-                app.into_make_service_with_connect_info::<SocketAddr>(),
-            )
-            .with_graceful_shutdown(async {
-                let _ = tokio::signal::ctrl_c().await;
-            })
-            .await
-            .map_err(|e| ApiError::internal(format!("server error: {e}")))
-        })
-        .map_err(|e| e.message)
+            println!("llmfit dashboard listening on http://{}/", addr);
+            println!("  API models: http://{}/api/v1/models", addr);
+            println!("  GET /health");
+            println!("  GET /api/v1/system");
+            println!("  GET /api/v1/models?limit=20&min_fit=marginal&sort=score");
+            println!("  GET /api/v1/models/top?limit=5&use_case=coding&min_fit=good");
+            println!("  GET /api/v1/models/<name>");
+
+            runtime
+                .block_on(async move {
+                    let listener = tokio::net::TcpListener::bind(addr)
+                        .await
+                        .map_err(|e| ApiError::internal(format!("bind failed on {addr}: {e}")))?;
+
+                    axum::serve(
+                        listener,
+                        app.into_make_service_with_connect_info::<SocketAddr>(),
+                    )
+                    .with_graceful_shutdown(async {
+                        let _ = tokio::signal::ctrl_c().await;
+                    })
+                    .await
+                    .map_err(|e| ApiError::internal(format!("server error: {e}")))
+                })
+                .map_err(|e| e.message)
+        }
+    }
 }
 
 fn build_router(state: Arc<AppState>) -> Router {

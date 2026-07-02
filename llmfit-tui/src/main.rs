@@ -727,6 +727,14 @@ AGENT USAGE:
         #[arg(long, default_value = "8787")]
         port: u16,
 
+        /// Listen on a Unix domain socket instead of TCP (unix platforms
+        /// only). Any stale socket file is replaced; the socket is created
+        /// with mode 0660. Intended for same-host/same-pod consumers (e.g.
+        /// the llmfit-dra DRA driver sidecar) where a TCP port on the host
+        /// network is undesirable.
+        #[arg(long, value_name = "PATH", conflicts_with_all = ["host", "port"])]
+        unix_socket: Option<std::path::PathBuf>,
+
         /// Run as MCP server on stdio instead of HTTP
         #[arg(long)]
         mcp: bool,
@@ -2768,6 +2776,7 @@ fn main() {
             Commands::Serve {
                 host,
                 port,
+                unix_socket,
                 mcp,
                 send_events,
                 nats_url,
@@ -2793,7 +2802,13 @@ fn main() {
                         eprintln!("NATS events enabled, publishing to {}", nats_url);
                     }
 
-                    if let Err(err) = serve_api::run_serve(&host, port, &overrides, context_limit) {
+                    if let Err(err) = serve_api::run_serve(
+                        &host,
+                        port,
+                        unix_socket.as_deref(),
+                        &overrides,
+                        context_limit,
+                    ) {
                         eprintln!("Error: {}", err);
                         std::process::exit(1);
                     }

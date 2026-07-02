@@ -34,6 +34,25 @@ http://127.0.0.1:8787
 
 To expose outside localhost, pass `--host 0.0.0.0`.
 
+### Unix domain socket
+
+For same-host consumers that should not touch the network at all (e.g. a
+sidecar in a `hostNetwork` Kubernetes pod, where a TCP bind would land on the
+node's loopback), listen on a Unix socket instead:
+
+```sh
+llmfit serve --unix-socket /run/llmfit/llmfit.sock
+```
+
+The socket is created with mode `0660`; a stale socket file from a previous
+instance is replaced automatically. All HTTP endpoints are identical:
+
+```sh
+curl --unix-socket /run/llmfit/llmfit.sock http://localhost/api/v1/system
+```
+
+`--unix-socket` conflicts with `--host`/`--port` and is unix-platforms only.
+
 If you are building from source and want the dashboard embedded in `llmfit`, build web assets first:
 
 ```sh
