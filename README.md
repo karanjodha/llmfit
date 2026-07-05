@@ -99,6 +99,10 @@ This prints JSON from `llmfit recommend` command. The JSON could be further quer
 ```
 podman run ghcr.io/alexsjones/llmfit recommend --use-case coding | jq '.models[].name'
 ```
+To launch the interactive TUI instead, pass the global `--tui` flag:
+```sh
+docker run --rm -it ghcr.io/alexsjones/llmfit --tui
+```
 
 ### From source
 ```sh

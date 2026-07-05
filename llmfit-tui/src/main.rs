@@ -168,6 +168,12 @@ struct Cli {
     #[arg(long, value_name = "TOKENS", value_parser = clap::value_parser!(u32).range(1..))]
     max_context: Option<u32>,
 
+    /// Force the interactive TUI, ignoring any subcommand or output flags.
+    /// Useful in Docker where a baked-in CMD would otherwise run a subcommand:
+    /// docker run --rm -it ghcr.io/alexsjones/llmfit --tui
+    #[arg(long, global = true)]
+    tui: bool,
+
     /// Do not auto-start the background dashboard server
     #[arg(long, global = true)]
     no_dashboard: bool,
@@ -2565,14 +2571,25 @@ fn main() {
         cpu_cores: cli.cpu_cores,
     };
     let auto_dashboard = !cli.no_dashboard
-        && !cli.json
-        && !matches!(cli.command.as_ref(), Some(Commands::Serve { .. }));
+        && (cli.tui
+            || (!cli.json && !matches!(cli.command.as_ref(), Some(Commands::Serve { .. }))));
 
     let _dashboard_guard = if auto_dashboard {
         ensure_dashboard_available(&overrides, context_limit)
     } else {
         None
     };
+
+    // --tui forces the interactive TUI regardless of any subcommand or
+    // output flags, so a Docker image with a baked-in CMD can still launch
+    // the TUI: docker run --rm -it ghcr.io/alexsjones/llmfit --tui
+    if cli.tui {
+        if let Err(e) = run_tui(&overrides, context_limit, cli.api_key) {
+            eprintln!("Error running TUI: {}", e);
+            std::process::exit(1);
+        }
+        return;
+    }
 
     // If a subcommand is given, use classic CLI mode
     if let Some(command) = cli.command {
