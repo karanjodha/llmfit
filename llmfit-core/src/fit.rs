@@ -111,6 +111,7 @@ pub enum InferenceRuntime {
     LlamaCpp, // llama.cpp / Ollama
     Mlx,      // Apple MLX framework
     Vllm,     // vLLM (for AWQ/GPTQ/AutoRound pre-quantized models)
+    Unsupported,
 }
 
 impl InferenceRuntime {
@@ -119,6 +120,7 @@ impl InferenceRuntime {
             InferenceRuntime::LlamaCpp => "llama.cpp",
             InferenceRuntime::Mlx => "MLX",
             InferenceRuntime::Vllm => "vLLM",
+            InferenceRuntime::Unsupported => "unsupported",
         }
     }
 }
@@ -295,6 +297,38 @@ impl ModelFit {
                 "Context capped at {} tokens for estimation (model supports up to {}; use --max-context to override)",
                 estimation_ctx, model.context_length
             ));
+        }
+
+        if model.requires_specialized_runtime() {
+            notes.push(
+                "Requires a specialized TTS runtime; llama.cpp/MLX/vLLM fit is not supported yet"
+                    .to_string(),
+            );
+            return ModelFit {
+                model: model.clone(),
+                fit_level: FitLevel::TooTight,
+                run_mode: RunMode::CpuOnly,
+                memory_required_gb: default_mem_required,
+                memory_available_gb: 0.0,
+                utilization_pct: 0.0,
+                notes,
+                moe_offloaded_gb: None,
+                score: 0.0,
+                score_components: ScoreComponents {
+                    quality: 0.0,
+                    speed: 0.0,
+                    fit: 0.0,
+                    context: 0.0,
+                },
+                estimated_tps: 0.0,
+                best_quant: model.quantization.clone(),
+                use_case,
+                runtime: InferenceRuntime::Unsupported,
+                installed: false,
+                fits_with_turboquant: false,
+                effective_context_length: estimation_ctx,
+                usable_context: 0,
+            };
         }
 
         // Determine inference runtime up front so path selection can use
@@ -835,7 +869,9 @@ fn best_quant_for_runtime_budget(
 }
 
 pub fn backend_compatible(model: &LlmModel, system: &SystemSpecs) -> bool {
-    if model.is_mlx_model() {
+    if model.requires_specialized_runtime() {
+        false
+    } else if model.is_mlx_model() {
         system.backend == GpuBackend::Metal && system.unified_memory
     } else if model.is_prequantized() {
         if !matches!(system.backend, GpuBackend::Cuda | GpuBackend::Rocm) {
@@ -1280,6 +1316,7 @@ fn estimate_tps(
     // Used when the GPU is not recognized (custom/unnamed GPUs,
     // synthetic entries from --memory override, etc.).
     let k: f64 = match (system.backend, runtime) {
+        (_, InferenceRuntime::Unsupported) => 0.0,
         (GpuBackend::Metal, InferenceRuntime::Mlx) => 250.0,
         (GpuBackend::Metal, InferenceRuntime::LlamaCpp) => 160.0,
         (GpuBackend::Metal, InferenceRuntime::Vllm) => 160.0,
@@ -1626,6 +1663,7 @@ mod tests {
             release_date: None,
             gguf_sources: vec![],
             capabilities: vec![],
+            languages: vec![],
             format: models::ModelFormat::default(),
             num_attention_heads: None,
             num_key_value_heads: None,
@@ -1814,6 +1852,26 @@ mod tests {
     }
 
     #[test]
+    fn test_tts_requires_unsupported_runtime() {
+        let mut model = test_model("82M", 1.0, Some(0.5));
+        model.quantization = "F16".to_string();
+        model.format = models::ModelFormat::Safetensors;
+        model.capabilities = vec![models::Capability::Audio, models::Capability::Tts];
+        let system = test_system(16.0, true, Some(8.0));
+
+        let fit = ModelFit::analyze(&model, &system);
+
+        assert_eq!(fit.runtime, InferenceRuntime::Unsupported);
+        assert_eq!(fit.fit_level, FitLevel::TooTight);
+        assert_eq!(fit.score, 0.0);
+        assert!(
+            fit.notes
+                .iter()
+                .any(|n| n.contains("specialized TTS runtime"))
+        );
+    }
+
+    #[test]
     fn test_moe_offload_tries_lower_quantization() {
         let model = LlmModel {
             name: "MoE Quant Test".to_string(),
@@ -1833,6 +1891,7 @@ mod tests {
             release_date: None,
             gguf_sources: vec![],
             capabilities: vec![],
+            languages: vec![],
             format: models::ModelFormat::default(),
             num_attention_heads: None,
             num_key_value_heads: None,
@@ -1877,6 +1936,7 @@ mod tests {
             release_date: None,
             gguf_sources: vec![],
             capabilities: vec![],
+            languages: vec![],
             format: models::ModelFormat::default(),
             num_attention_heads: None,
             num_key_value_heads: None,
@@ -2893,6 +2953,16 @@ mod tests {
     }
 
     #[test]
+    fn test_tts_backend_incompatible_until_runtime_supported() {
+        let mut model = test_model("82M", 1.0, Some(0.5));
+        model.format = models::ModelFormat::Safetensors;
+        model.capabilities = vec![models::Capability::Audio, models::Capability::Tts];
+
+        let cuda_sys = test_system(64.0, true, Some(24.0));
+        assert!(!backend_compatible(&model, &cuda_sys));
+    }
+
+    #[test]
     fn test_awq_incompatible_on_volta_v100() {
         // V100 is Volta (cc 7.0) — AWQ requires cc >= 7.5
         let mut model = test_model("7B", 4.0, Some(4.0));
@@ -2991,6 +3061,7 @@ mod tests {
             release_date: None,
             gguf_sources: vec![],
             capabilities: vec![],
+            languages: vec![],
             format: models::ModelFormat::default(),
             num_attention_heads: None,
             num_key_value_heads: None,
@@ -3276,6 +3347,7 @@ mod tests {
             release_date: None,
             gguf_sources: vec![],
             capabilities: vec![],
+            languages: vec![],
             format: models::ModelFormat::default(),
             num_attention_heads: None,
             num_key_value_heads: None,
@@ -3559,6 +3631,7 @@ mod tests {
             release_date: None,
             gguf_sources: vec![],
             capabilities: vec![],
+            languages: vec![],
             format: models::ModelFormat::default(),
             num_attention_heads: Some(num_attention_heads),
             num_key_value_heads: Some(num_key_value_heads),

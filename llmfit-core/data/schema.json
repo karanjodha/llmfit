@@ -35,7 +35,8 @@
       "enum": [
         "vision",
         "tool_use",
-        "audio"
+        "audio",
+        "tts"
       ]
     },
     "modelFormat": {
@@ -150,6 +151,14 @@
           "type": "array",
           "items": {
             "$ref": "#/$defs/capability"
+          },
+          "uniqueItems": true
+        },
+        "languages": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
           },
           "uniqueItems": true
         },
