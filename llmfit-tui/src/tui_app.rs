@@ -4,7 +4,8 @@ use llmfit_core::models::{Capability, ModelDatabase, UseCase};
 use llmfit_core::plan::{PlanEstimate, PlanRequest, estimate_model_plan};
 use llmfit_core::providers::{
     self, DockerModelRunnerProvider, LlamaCppProvider, LmStudioProvider, MlxProvider,
-    ModelProvider, OllamaProvider, PullEvent, PullHandle, VllmProvider, command_exists,
+    ModelProvider, OllamaProvider, PullEvent, PullHandle, RamaLamaProvider, VllmProvider,
+    command_exists,
 };
 use llmfit_core::quality;
 
@@ -95,6 +96,11 @@ pub enum ProviderDetectionMsg {
         installed_count: usize,
     },
     Vllm {
+        available: bool,
+        installed: HashSet<String>,
+        installed_count: usize,
+    },
+    RamaLama {
         available: bool,
         installed: HashSet<String>,
         installed_count: usize,
@@ -617,6 +623,8 @@ pub struct App {
     lmstudio: LmStudioProvider,
     pub vllm_available: bool,
     vllm: VllmProvider,
+    pub ramalama_available: bool,
+    ramalama: RamaLamaProvider,
 
     // Download state
     pub pull_active: Option<PullHandle>,
@@ -788,6 +796,8 @@ impl App {
         let lmstudio_available = false;
         let vllm = VllmProvider::new();
         let vllm_available = false;
+        let ramalama = RamaLamaProvider::new();
+        let ramalama_available = false;
         let mut installed = llmfit_core::analysis::InstalledIndex::empty();
         installed.llamacpp = llamacpp_installed;
         installed.llamacpp_count = llamacpp_installed_count;
@@ -845,11 +855,23 @@ impl App {
             });
         }
         {
-            let tx = provider_tx;
+            let tx = provider_tx.clone();
             thread::spawn(move || {
                 let vllm = VllmProvider::new();
                 let (available, installed, installed_count) = vllm.detect_with_installed();
                 let _ = tx.send(ProviderDetectionMsg::Vllm {
+                    available,
+                    installed,
+                    installed_count,
+                });
+            });
+        }
+        {
+            let tx = provider_tx;
+            thread::spawn(move || {
+                let ramalama = RamaLamaProvider::new();
+                let (available, installed, installed_count) = ramalama.detect_with_installed();
+                let _ = tx.send(ProviderDetectionMsg::RamaLama {
                     available,
                     installed,
                     installed_count,
@@ -1094,6 +1116,8 @@ impl App {
             lmstudio,
             vllm_available,
             vllm,
+            ramalama_available,
+            ramalama,
             pull_active: None,
             pull_status: None,
             pull_percent: None,
@@ -3761,6 +3785,7 @@ impl App {
         let (docker_mr, docker_mr_count) = self.docker_mr.installed_models_counted();
         let (lmstudio, lmstudio_count) = self.lmstudio.installed_models_counted();
         let (vllm, vllm_count) = self.vllm.installed_models_counted();
+        let (ramalama, ramalama_count) = self.ramalama.installed_models_counted();
         self.installed = llmfit_core::analysis::InstalledIndex {
             ollama,
             ollama_count,
@@ -3773,6 +3798,8 @@ impl App {
             lmstudio_count,
             vllm,
             vllm_count,
+            ramalama,
+            ramalama_count,
         };
         for fit in &mut self.all_fits {
             fit.installed = self.installed.is_installed(&fit.model.name);
@@ -3917,6 +3944,15 @@ impl App {
                             self.vllm_available = available;
                             self.installed.vllm = installed;
                             self.installed.vllm_count = installed_count;
+                        }
+                        ProviderDetectionMsg::RamaLama {
+                            available,
+                            installed,
+                            installed_count,
+                        } => {
+                            self.ramalama_available = available;
+                            self.installed.ramalama = installed;
+                            self.installed.ramalama_count = installed_count;
                         }
                     }
                 }

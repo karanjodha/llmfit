@@ -211,6 +211,17 @@ fn draw_system_bar(frame: &mut Frame, app: &App, area: Rect, tc: &ThemeColors) {
         tc.muted
     };
 
+    let ramalama_info = if app.ramalama_available {
+        format!("RamaLama: ✓ ({} models)", app.installed.ramalama_count)
+    } else {
+        "RamaLama: ✗".to_string()
+    };
+    let ramalama_color = if app.ramalama_available {
+        tc.good
+    } else {
+        tc.muted
+    };
+
     let mut hw_spans = Vec::new();
     if app.sim_active {
         hw_spans.push(Span::styled(
@@ -256,6 +267,8 @@ fn draw_system_bar(frame: &mut Frame, app: &App, area: Rect, tc: &ThemeColors) {
         Span::styled(lmstudio_info, Style::default().fg(lmstudio_color)),
         Span::styled("  │  ", Style::default().fg(tc.muted)),
         Span::styled(vllm_info, Style::default().fg(vllm_color)),
+        Span::styled("  │  ", Style::default().fg(tc.muted)),
+        Span::styled(ramalama_info, Style::default().fg(ramalama_color)),
     ];
 
     if app.backend_hidden_count > 0 {

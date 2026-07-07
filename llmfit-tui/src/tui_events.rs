@@ -178,7 +178,8 @@ fn handle_normal_mode(app: &mut App, key: KeyEvent) {
                 || app.mlx_available
                 || app.llamacpp_available
                 || app.lmstudio_available
-                || app.vllm_available =>
+                || app.vllm_available
+                || app.ramalama_available =>
         {
             app.toggle_installed_first()
         }
@@ -202,7 +203,8 @@ fn handle_normal_mode(app: &mut App, key: KeyEvent) {
                 || app.mlx_available
                 || app.llamacpp_available
                 || app.lmstudio_available
-                || app.vllm_available =>
+                || app.vllm_available
+                || app.ramalama_available =>
         {
             app.refresh_installed()
         }

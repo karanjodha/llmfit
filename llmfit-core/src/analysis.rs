@@ -3,7 +3,7 @@ use crate::hardware::SystemSpecs;
 use crate::models::ModelDatabase;
 use crate::providers::{
     self, DockerModelRunnerProvider, LlamaCppProvider, LmStudioProvider, MlxProvider,
-    ModelProvider, OllamaProvider, VllmProvider,
+    ModelProvider, OllamaProvider, RamaLamaProvider, VllmProvider,
 };
 use std::collections::HashSet;
 
@@ -25,6 +25,8 @@ pub struct InstalledIndex {
     pub lmstudio_count: usize,
     pub vllm: HashSet<String>,
     pub vllm_count: usize,
+    pub ramalama: HashSet<String>,
+    pub ramalama_count: usize,
 }
 
 impl InstalledIndex {
@@ -42,6 +44,8 @@ impl InstalledIndex {
             lmstudio_count: 0,
             vllm: HashSet::new(),
             vllm_count: 0,
+            ramalama: HashSet::new(),
+            ramalama_count: 0,
         }
     }
 
@@ -73,6 +77,10 @@ impl InstalledIndex {
                 let p = VllmProvider::new();
                 p.installed_models_counted()
             });
+            let ramalama = s.spawn(|| {
+                let p = RamaLamaProvider::new();
+                p.installed_models_counted()
+            });
 
             let (ollama, ollama_count) = ollama.join().unwrap();
             let mlx = mlx.join().unwrap();
@@ -80,6 +88,7 @@ impl InstalledIndex {
             let (docker_mr, docker_mr_count) = docker_mr.join().unwrap();
             let (lmstudio, lmstudio_count) = lmstudio.join().unwrap();
             let (vllm, vllm_count) = vllm.join().unwrap();
+            let (ramalama, ramalama_count) = ramalama.join().unwrap();
 
             Self {
                 ollama,
@@ -93,6 +102,8 @@ impl InstalledIndex {
                 lmstudio_count,
                 vllm,
                 vllm_count,
+                ramalama,
+                ramalama_count,
             }
         })
     }
@@ -105,6 +116,7 @@ impl InstalledIndex {
             || providers::is_model_installed_docker_mr(model_name, &self.docker_mr)
             || providers::is_model_installed_lmstudio(model_name, &self.lmstudio)
             || providers::is_model_installed_vllm(model_name, &self.vllm)
+            || providers::is_model_installed_ramalama(model_name, &self.ramalama)
     }
 
     /// Returns the display names of all providers that have this model
@@ -128,6 +140,9 @@ impl InstalledIndex {
         }
         if providers::is_model_installed_vllm(model_name, &self.vllm) {
             out.push("vLLM");
+        }
+        if providers::is_model_installed_ramalama(model_name, &self.ramalama) {
+            out.push("RamaLama");
         }
         out
     }

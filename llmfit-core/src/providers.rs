@@ -2408,6 +2408,195 @@ pub fn vllm_pull_tag(hf_name: &str) -> Option<String> {
 }
 
 // ---------------------------------------------------------------------------
+// RamaLama provider
+// ---------------------------------------------------------------------------
+
+/// RamaLama — container-based model runner with an OpenAI-compatible API.
+///
+/// Exposes `GET /v1/models` to list served models at
+/// `http://localhost:8080` by default. Override with `RAMALAMA_HOST`.
+///
+/// Like vLLM, RamaLama has no runtime pull endpoint — models are served
+/// via `ramalama serve <model>`. The `start_pull` implementation returns
+/// an informational error directing users to serve the desired model.
+pub struct RamaLamaProvider {
+    base_url: String,
+}
+
+fn normalize_ramalama_host(raw: &str) -> Option<String> {
+    let host = raw.trim();
+    if host.is_empty() {
+        return None;
+    }
+
+    if host.starts_with("http://") || host.starts_with("https://") {
+        return Some(host.to_string());
+    }
+
+    if host.contains("://") {
+        return None;
+    }
+
+    Some(format!("http://{host}"))
+}
+
+impl Default for RamaLamaProvider {
+    fn default() -> Self {
+        let base_url = std::env::var("RAMALAMA_HOST")
+            .ok()
+            .and_then(|raw| {
+                let normalized = normalize_ramalama_host(&raw);
+                if normalized.is_none() {
+                    eprintln!(
+                        "Warning: could not parse RAMALAMA_HOST='{}'. \
+                         Expected host:port or http(s)://host:port",
+                        raw
+                    );
+                }
+                normalized
+            })
+            .unwrap_or_else(|| "http://localhost:8080".to_string());
+        Self { base_url }
+    }
+}
+
+impl RamaLamaProvider {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    fn models_url(&self) -> String {
+        format!("{}/v1/models", self.base_url.trim_end_matches('/'))
+    }
+
+    /// Single-pass startup probe.
+    /// Returns `(available, installed_models, count)`.
+    pub fn detect_with_installed(&self) -> (bool, HashSet<String>, usize) {
+        let mut set = HashSet::new();
+        let Ok(resp) = ureq::get(&self.models_url())
+            .config()
+            .timeout_global(Some(std::time::Duration::from_millis(800)))
+            .build()
+            .call()
+        else {
+            return (false, set, 0);
+        };
+
+        let Ok(list) = resp.into_body().read_json::<RamaLamaModelList>() else {
+            return (true, set, 0);
+        };
+        let models = list.data;
+        let count = models.len();
+        for m in models {
+            let lower = m.id.to_lowercase();
+            set.insert(lower.clone());
+            // Also insert the model part after the publisher
+            // e.g. "meta-llama/Llama-3.1-8B-Instruct" → "llama-3.1-8b-instruct"
+            if let Some(name) = lower.split('/').next_back()
+                && name != lower
+            {
+                set.insert(name.to_string());
+            }
+        }
+        (true, set, count)
+    }
+
+    pub fn installed_models_counted(&self) -> (HashSet<String>, usize) {
+        let (_, set, count) = self.detect_with_installed();
+        (set, count)
+    }
+}
+
+#[derive(serde::Deserialize)]
+struct RamaLamaModelList {
+    data: Vec<RamaLamaModel>,
+}
+
+#[derive(serde::Deserialize)]
+struct RamaLamaModel {
+    /// Model id, e.g. "meta-llama/Llama-3.1-8B-Instruct"
+    id: String,
+}
+
+impl ModelProvider for RamaLamaProvider {
+    fn name(&self) -> &str {
+        "RamaLama"
+    }
+
+    fn is_available(&self) -> bool {
+        ureq::get(&self.models_url())
+            .config()
+            .timeout_global(Some(std::time::Duration::from_secs(2)))
+            .build()
+            .call()
+            .is_ok()
+    }
+
+    fn installed_models(&self) -> HashSet<String> {
+        let (set, _) = self.installed_models_counted();
+        set
+    }
+
+    fn start_pull(&self, _model_tag: &str) -> Result<PullHandle, String> {
+        Err("RamaLama does not support downloading models at runtime. \
+             Serve the desired model with `ramalama serve <model>`."
+            .to_string())
+    }
+}
+
+// ---------------------------------------------------------------------------
+// RamaLama name-matching helpers
+// ---------------------------------------------------------------------------
+
+/// RamaLama serves HuggingFace/OCI model names directly. We match against the
+/// model's full HF name and common naming patterns.
+pub fn hf_name_to_ramalama_candidates(hf_name: &str) -> Vec<String> {
+    let repo = hf_name
+        .split('/')
+        .next_back()
+        .unwrap_or(hf_name)
+        .to_lowercase();
+    let mut candidates = vec![hf_name.to_lowercase()];
+    if repo != hf_name.to_lowercase() {
+        candidates.push(repo.clone());
+    }
+    // Strip common suffixes for matching
+    let stripped = repo
+        .replace("-instruct", "")
+        .replace("-chat", "")
+        .replace("-hf", "")
+        .replace("-it", "");
+    if stripped != repo {
+        candidates.push(stripped);
+    }
+    candidates
+}
+
+/// Check if any RamaLama candidates for an HF model appear in the installed set.
+pub fn is_model_installed_ramalama(hf_name: &str, installed: &HashSet<String>) -> bool {
+    let candidates = hf_name_to_ramalama_candidates(hf_name);
+    candidates.iter().any(|candidate| {
+        installed
+            .iter()
+            .any(|installed_name| installed_name.contains(candidate))
+    })
+}
+
+/// RamaLama can serve any HuggingFace model, so we always return true.
+pub fn has_ramalama_mapping(hf_name: &str) -> bool {
+    !hf_name.is_empty()
+}
+
+/// Given an HF model name, return the model identifier to use for RamaLama.
+/// RamaLama accepts HF model names directly.
+pub fn ramalama_pull_tag(hf_name: &str) -> Option<String> {
+    if hf_name.is_empty() {
+        return None;
+    }
+    Some(hf_name.to_string())
+}
+
+// ---------------------------------------------------------------------------
 // Docker Model Runner name-matching helpers
 // ---------------------------------------------------------------------------
 
@@ -4485,6 +4674,75 @@ mod tests {
     fn test_normalize_vllm_host_empty() {
         assert_eq!(normalize_vllm_host(""), None);
         assert_eq!(normalize_vllm_host("  "), None);
+    }
+
+    #[test]
+    fn test_hf_name_to_ramalama_candidates() {
+        let candidates = hf_name_to_ramalama_candidates("meta-llama/Llama-3.1-8B-Instruct");
+        assert!(
+            candidates
+                .iter()
+                .any(|c| c == "meta-llama/llama-3.1-8b-instruct")
+        );
+        assert!(candidates.iter().any(|c| c == "llama-3.1-8b-instruct"));
+        // stripped variant (without -instruct)
+        assert!(candidates.iter().any(|c| c == "llama-3.1-8b"));
+    }
+
+    #[test]
+    fn test_is_model_installed_ramalama() {
+        let mut installed = HashSet::new();
+        installed.insert("meta-llama/llama-3.1-8b-instruct".to_string());
+        assert!(is_model_installed_ramalama(
+            "meta-llama/Llama-3.1-8B-Instruct",
+            &installed
+        ));
+        assert!(!is_model_installed_ramalama(
+            "meta-llama/Llama-3.1-70B-Instruct",
+            &installed
+        ));
+    }
+
+    #[test]
+    fn test_has_ramalama_mapping() {
+        assert!(has_ramalama_mapping("meta-llama/Llama-3.1-8B-Instruct"));
+        assert!(!has_ramalama_mapping(""));
+    }
+
+    #[test]
+    fn test_ramalama_pull_tag() {
+        assert_eq!(
+            ramalama_pull_tag("meta-llama/Llama-3.1-8B-Instruct"),
+            Some("meta-llama/Llama-3.1-8B-Instruct".to_string())
+        );
+        assert_eq!(ramalama_pull_tag(""), None);
+    }
+
+    #[test]
+    fn test_normalize_ramalama_host_with_scheme() {
+        assert_eq!(
+            normalize_ramalama_host("http://myhost:8080"),
+            Some("http://myhost:8080".to_string())
+        );
+    }
+
+    #[test]
+    fn test_normalize_ramalama_host_without_scheme() {
+        assert_eq!(
+            normalize_ramalama_host("myhost:8080"),
+            Some("http://myhost:8080".to_string())
+        );
+    }
+
+    #[test]
+    fn test_normalize_ramalama_host_rejects_unsupported_scheme() {
+        assert_eq!(normalize_ramalama_host("ftp://myhost:8080"), None);
+    }
+
+    #[test]
+    fn test_normalize_ramalama_host_empty() {
+        assert_eq!(normalize_ramalama_host(""), None);
+        assert_eq!(normalize_ramalama_host("  "), None);
     }
 
     #[test]
