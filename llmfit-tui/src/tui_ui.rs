@@ -3748,7 +3748,7 @@ fn draw_advanced_config_popup(frame: &mut Frame, app: &App, tc: &ThemeColors) {
     let area = frame.area();
 
     let popup_width = 52u16.min(area.width.saturating_sub(4));
-    let popup_height = 16u16.min(area.height.saturating_sub(4));
+    let popup_height = 17u16.min(area.height.saturating_sub(4));
     let x = area.x + (area.width.saturating_sub(popup_width)) / 2;
     let y = area.y + (area.height.saturating_sub(popup_height)) / 2;
     let popup_area = Rect::new(x, y, popup_width, popup_height);
@@ -3806,6 +3806,11 @@ fn draw_advanced_config_popup(frame: &mut Frame, app: &App, tc: &ThemeColors) {
             &app.adv_config_context_cap_input,
             AdvConfigField::ContextCap,
         ),
+        (
+            "  DDR GB/s:",
+            &app.adv_config_ddr_bandwidth_input,
+            AdvConfigField::DdrBandwidth,
+        ),
     ];
 
     let mut lines: Vec<Line> = Vec::new();
@@ -3854,6 +3859,7 @@ fn draw_advanced_config_popup(frame: &mut Frame, app: &App, tc: &ThemeColors) {
         AdvConfigField::FactorTp => 5,
         AdvConfigField::FactorCpuOnly => 6,
         AdvConfigField::ContextCap => 7,
+        AdvConfigField::DdrBandwidth => 8,
     };
     let cursor_x = inner.x + 14 + app.adv_config_cursor_position as u16;
     let cursor_y = inner.y + field_row;

@@ -181,6 +181,7 @@ pub enum AdvConfigField {
     FactorTp,         // Run mode factor: Tensor parallel
     FactorCpuOnly,    // Run mode factor: CPU only
     ContextCap,       // Context window cap
+    DdrBandwidth,     // System RAM bandwidth (GB/s) for MoE offload
 }
 
 impl AdvConfigField {
@@ -192,13 +193,15 @@ impl AdvConfigField {
             AdvConfigField::FactorMoe => AdvConfigField::FactorTp,
             AdvConfigField::FactorTp => AdvConfigField::FactorCpuOnly,
             AdvConfigField::FactorCpuOnly => AdvConfigField::ContextCap,
-            AdvConfigField::ContextCap => AdvConfigField::Efficiency,
+            AdvConfigField::ContextCap => AdvConfigField::DdrBandwidth,
+            AdvConfigField::DdrBandwidth => AdvConfigField::Efficiency,
         }
     }
 
     fn prev(self) -> Self {
         match self {
-            AdvConfigField::Efficiency => AdvConfigField::ContextCap,
+            AdvConfigField::Efficiency => AdvConfigField::DdrBandwidth,
+            AdvConfigField::DdrBandwidth => AdvConfigField::ContextCap,
             AdvConfigField::FactorGpu => AdvConfigField::Efficiency,
             AdvConfigField::FactorCpuOffload => AdvConfigField::FactorGpu,
             AdvConfigField::FactorMoe => AdvConfigField::FactorCpuOffload,
@@ -703,6 +706,7 @@ pub struct App {
     pub adv_config_eff_factor_tp: String,
     pub adv_config_eff_factor_cpu_only: String,
     pub adv_config_context_cap_input: String,
+    pub adv_config_ddr_bandwidth_input: String,
 
     // Filter Popup
     pub filter_field: FilterPopupField,
@@ -1154,6 +1158,7 @@ impl App {
             adv_config_eff_factor_tp: "0.9".to_string(),
             adv_config_eff_factor_cpu_only: "0.3".to_string(),
             adv_config_context_cap_input: String::new(), // empty = use default
+            adv_config_ddr_bandwidth_input: String::new(), // empty = auto-detect
             // Filter popup defaults
             filter_field: FilterPopupField::ParamsMin,
             filter_cursor_position: 0,
@@ -3028,6 +3033,10 @@ impl App {
             Some(cap) => cap.to_string(),
             None => String::new(),
         };
+        self.adv_config_ddr_bandwidth_input = match self.calc_config.ddr_bandwidth_gbps {
+            Some(bw) => format!("{bw:.0}"),
+            None => String::new(),
+        };
         self.adv_config_field = AdvConfigField::Efficiency;
         self.adv_config_cursor_position = self.adv_config_efficiency_input.len();
         self.adv_config_dirty = false;
@@ -3190,6 +3199,7 @@ impl App {
             AdvConfigField::FactorTp => &self.adv_config_eff_factor_tp,
             AdvConfigField::FactorCpuOnly => &self.adv_config_eff_factor_cpu_only,
             AdvConfigField::ContextCap => &self.adv_config_context_cap_input,
+            AdvConfigField::DdrBandwidth => &self.adv_config_ddr_bandwidth_input,
         }
     }
 
@@ -3202,6 +3212,7 @@ impl App {
             AdvConfigField::FactorTp => &mut self.adv_config_eff_factor_tp,
             AdvConfigField::FactorCpuOnly => &mut self.adv_config_eff_factor_cpu_only,
             AdvConfigField::ContextCap => &mut self.adv_config_context_cap_input,
+            AdvConfigField::DdrBandwidth => &mut self.adv_config_ddr_bandwidth_input,
         }
     }
 
@@ -3309,6 +3320,15 @@ impl App {
         } else {
             self.adv_config_context_cap_input.parse().ok()
         };
+        // Empty = auto (env var, then measured, then 50 GB/s fallback).
+        let ddr_bandwidth_gbps: Option<f64> = if self.adv_config_ddr_bandwidth_input.is_empty() {
+            None
+        } else {
+            self.adv_config_ddr_bandwidth_input
+                .parse()
+                .ok()
+                .filter(|bw: &f64| *bw > 0.0)
+        };
 
         // Update the config
         self.calc_config = CalcConfig {
@@ -3321,6 +3341,7 @@ impl App {
                 cpu_only,
             },
             context_cap,
+            ddr_bandwidth_gbps,
             ..self.calc_config
         };
 

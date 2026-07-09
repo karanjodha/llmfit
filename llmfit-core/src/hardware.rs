@@ -1865,6 +1865,9 @@ impl SystemSpecs {
         println!("CPU: {} ({} cores)", self.cpu_name, self.total_cpu_cores);
         println!("Total RAM: {:.2} GB", self.total_ram_gb);
         println!("Available RAM: {:.2} GB", self.available_ram_gb);
+        if let Some(bw) = measured_ram_bandwidth_gbps() {
+            println!("RAM Bandwidth: ~{bw:.0} GB/s (measured)");
+        }
         println!("Backend: {}", self.backend.label());
 
         if self.gpus.is_empty() {
@@ -2048,6 +2051,68 @@ fn read_proc_meminfo_total_gb() -> Option<f64> {
         }
     }
     None
+}
+
+/// Effective system RAM bandwidth in GB/s, measured once per process with a
+/// short multithreaded memcpy sweep (~100 ms total) and cached.
+///
+/// This is *achievable* streaming bandwidth (STREAM-copy convention: bytes
+/// read + bytes written per pass), which is what MoE-offload expert streaming
+/// actually sees — typically 60–80% of the spec-sheet peak. Returns `None`
+/// if the measurement fails or produces an implausible value; callers should
+/// fall back to a conservative constant.
+pub fn measured_ram_bandwidth_gbps() -> Option<f64> {
+    static MEASURED: std::sync::OnceLock<Option<f64>> = std::sync::OnceLock::new();
+    *MEASURED.get_or_init(measure_ram_bandwidth_gbps)
+}
+
+fn measure_ram_bandwidth_gbps() -> Option<f64> {
+    use std::time::{Duration, Instant};
+
+    // Per-thread working set (2 × 32 MiB) must comfortably exceed L3 so we
+    // measure DRAM, not cache. A single thread rarely saturates multi-channel
+    // memory controllers, so spread the sweep across up to 8 cores.
+    const BUF_BYTES: usize = 32 * 1024 * 1024;
+    const MEASURE_WINDOW: Duration = Duration::from_millis(80);
+
+    let threads = std::thread::available_parallelism()
+        .map(|n| n.get().min(8))
+        .unwrap_or(4);
+
+    let barrier = std::sync::Barrier::new(threads);
+    let per_thread_gbps: Vec<f64> = std::thread::scope(|scope| {
+        let barrier = &barrier;
+        let handles: Vec<_> = (0..threads)
+            .map(|_| {
+                scope.spawn(move || {
+                    let src = vec![1u8; BUF_BYTES];
+                    let mut dst = vec![0u8; BUF_BYTES];
+                    // Warmup pass faults pages in before the timed window.
+                    dst.copy_from_slice(&src);
+                    std::hint::black_box(&mut dst);
+                    barrier.wait();
+                    let start = Instant::now();
+                    let mut passes = 0u64;
+                    while start.elapsed() < MEASURE_WINDOW {
+                        dst.copy_from_slice(&src);
+                        std::hint::black_box(&mut dst);
+                        passes += 1;
+                    }
+                    let secs = start.elapsed().as_secs_f64();
+                    (passes as f64) * (2 * BUF_BYTES) as f64 / secs / 1e9
+                })
+            })
+            .collect();
+        handles.into_iter().filter_map(|h| h.join().ok()).collect()
+    });
+
+    if per_thread_gbps.len() != threads {
+        return None;
+    }
+    let total: f64 = per_thread_gbps.iter().sum();
+    // Sanity band: below 2 GB/s means the measurement was starved (heavy
+    // contention, throttled VM); above 4000 GB/s means we measured cache.
+    (2.0..=4000.0).contains(&total).then_some(total)
 }
 
 /// Estimate GPU memory bandwidth in GB/s from the GPU model name.
@@ -2735,6 +2800,16 @@ fn estimate_vram_from_name(name: &str) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::SystemSpecs;
+
+    #[test]
+    fn test_measured_ram_bandwidth_plausible_and_cached() {
+        // May legitimately be None on a starved CI runner; when it measures,
+        // the value must sit in the sanity band and be stable across calls.
+        if let Some(bw) = super::measured_ram_bandwidth_gbps() {
+            assert!((2.0..=4000.0).contains(&bw), "implausible bandwidth: {bw}");
+            assert_eq!(super::measured_ram_bandwidth_gbps(), Some(bw));
+        }
+    }
 
     #[test]
     fn test_parse_nvidia_smi_does_not_sum_multi_gpu_vram() {
