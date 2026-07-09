@@ -809,14 +809,20 @@ fn draw_table(frame: &mut Frame, app: &mut App, area: Rect, tc: &ThemeColors) {
                 tc.score_low
             };
 
-            #[allow(clippy::if_same_then_else)]
-            let tps_text = if fit.estimated_tps >= 100.0 {
-                format!("{:.0}", fit.estimated_tps)
-            } else if fit.estimated_tps >= 10.0 {
-                format!("{:.1}", fit.estimated_tps)
-            } else {
-                format!("{:.1}", fit.estimated_tps)
+            // Community-measured tok/s (marked ✓) takes priority over the
+            // formula estimate when matching hardware data exists.
+            let (tps_value, tps_measured) = match &fit.measured_tps {
+                Some(m) => (m.tok_s, true),
+                None => (fit.estimated_tps, false),
             };
+            let mut tps_text = if tps_value >= 100.0 {
+                format!("{:.0}", tps_value)
+            } else {
+                format!("{:.1}", tps_value)
+            };
+            if tps_measured {
+                tps_text.push('✓');
+            }
 
             let is_pulling = app.pull_active.is_some()
                 && app.pull_model_name.as_deref() == Some(&fit.model.name);

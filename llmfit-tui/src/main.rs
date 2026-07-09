@@ -2735,7 +2735,13 @@ fn main() {
                     }
                 };
 
-                let fit = ModelFit::analyze_with_context_limit(&models[idx], &specs, context_limit);
+                let mut fit =
+                    ModelFit::analyze_with_context_limit(&models[idx], &specs, context_limit);
+                fit.measured_tps = llmfit_core::benchmarks::measured_tps_for(
+                    &specs,
+                    &fit.model.name,
+                    &fit.best_quant,
+                );
                 if cli.json {
                     display::display_json_fits(&specs, &[fit]);
                 } else {
@@ -3011,6 +3017,8 @@ mod tests {
             fits_with_turboquant: false,
             effective_context_length: 8192,
             usable_context: 8192,
+            estimate_basis: Default::default(),
+            measured_tps: None,
         }
     }
 

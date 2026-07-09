@@ -869,6 +869,7 @@ impl App {
             .count();
 
         // Only analyze models that can actually run on this hardware.
+        let measured_index = llmfit_core::benchmarks::MeasuredTpsIndex::for_specs(&specs);
         let mut all_fits: Vec<ModelFit> = db
             .get_all_models()
             .iter()
@@ -876,6 +877,9 @@ impl App {
             .map(|m| {
                 let mut fit = ModelFit::analyze_with_context_limit(m, &specs, context_limit);
                 fit.installed = installed.is_installed(&m.name);
+                fit.measured_tps = measured_index
+                    .as_ref()
+                    .and_then(|idx| idx.lookup(&m.name, &fit.best_quant));
                 fit
             })
             .collect();
@@ -2924,6 +2928,7 @@ impl App {
             .filter(|m| !backend_compatible(m, &self.specs))
             .count();
 
+        let measured_index = llmfit_core::benchmarks::MeasuredTpsIndex::for_specs(&self.specs);
         self.all_fits = db
             .get_all_models()
             .iter()
@@ -2932,6 +2937,9 @@ impl App {
                 let mut fit =
                     ModelFit::analyze_with_context_limit(m, &self.specs, self.context_limit);
                 fit.installed = self.installed.is_installed(&m.name);
+                fit.measured_tps = measured_index
+                    .as_ref()
+                    .and_then(|idx| idx.lookup(&m.name, &fit.best_quant));
                 fit
             })
             .collect();
@@ -3360,6 +3368,7 @@ impl App {
             .filter(|m| !backend_compatible(m, &self.specs))
             .count();
 
+        let measured_index = llmfit_core::benchmarks::MeasuredTpsIndex::for_specs(&self.specs);
         self.all_fits = db
             .get_all_models()
             .iter()
@@ -3368,6 +3377,9 @@ impl App {
                 let mut fit =
                     ModelFit::analyze_with_config(m, &self.specs, self.calc_config.clone());
                 fit.installed = self.installed.is_installed(&m.name);
+                fit.measured_tps = measured_index
+                    .as_ref()
+                    .and_then(|idx| idx.lookup(&m.name, &fit.best_quant));
                 fit
             })
             .collect();
@@ -4426,6 +4438,8 @@ mod tests {
             fits_with_turboquant: false,
             effective_context_length: 8192,
             usable_context: 8192,
+            estimate_basis: Default::default(),
+            measured_tps: None,
         }
     }
 

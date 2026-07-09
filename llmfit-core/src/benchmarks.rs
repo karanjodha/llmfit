@@ -367,6 +367,121 @@ pub fn cached_preset_labels() -> Vec<&'static str> {
     labels
 }
 
+// ── Measured throughput lookup (provenance-weighted estimates) ──────
+
+/// A real measured throughput from community benchmark runs on hardware
+/// matching the user's detected system. When present, this is ground truth
+/// and should be displayed with priority over the formula estimate.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct MeasuredTps {
+    /// Median measured generation throughput (tok/s).
+    pub tok_s: f64,
+    /// Number of community runs behind the median.
+    pub sample_count: u32,
+    /// Hardware preset the runs come from (e.g. "RTX 3090 (24 GB)").
+    pub hardware_label: String,
+}
+
+/// Find the embedded-cache hardware preset matching the detected GPU.
+pub fn cached_preset_for_specs(specs: &SystemSpecs) -> Option<&'static HardwarePreset> {
+    let gpu = specs.gpu_name.as_deref()?.to_lowercase();
+    HardwarePreset::all().iter().find(|p| {
+        p.hardware_name
+            .is_some_and(|hw| gpu.contains(&hw.to_lowercase()))
+    })
+}
+
+/// Prebuilt index of comparable measured runs for the detected hardware.
+/// Build once per fit pass, then O(1) lookups per model.
+pub struct MeasuredTpsIndex {
+    hardware_label: &'static str,
+    /// (model slug, quantization lowercase) -> sorted tok/s samples.
+    samples: std::collections::HashMap<(String, String), Vec<f64>>,
+}
+
+impl MeasuredTpsIndex {
+    /// Build the index from the embedded cache for the preset matching the
+    /// detected GPU. Only rows comparable to `estimated_tps` are indexed:
+    /// single-request generation (batch <= 1), no speculative decoding /
+    /// MTP. Returns None when the GPU has no preset or no rows qualify.
+    pub fn for_specs(specs: &SystemSpecs) -> Option<Self> {
+        let preset = cached_preset_for_specs(specs)?;
+        let resp = cached_leaderboard_for_preset(preset.label)?;
+        Self::from_rows(&resp.rows, preset.label)
+    }
+
+    fn from_rows(rows: &[LeaderboardEntry], hardware_label: &'static str) -> Option<Self> {
+        let mut samples: std::collections::HashMap<(String, String), Vec<f64>> =
+            std::collections::HashMap::new();
+        for row in rows {
+            if row.batch_size.unwrap_or(1) > 1 {
+                continue;
+            }
+            if row
+                .engine_flags
+                .as_ref()
+                .is_some_and(|f| f.spec_decoding.unwrap_or(false) || f.mtp_enabled.unwrap_or(false))
+            {
+                continue;
+            }
+            let Some(tok_s) = row.tok_s_out.filter(|t| *t > 0.5) else {
+                continue;
+            };
+            let hf_id = row.hf_id();
+            let quant = row.quantization();
+            if hf_id.is_empty() || quant.is_empty() {
+                continue;
+            }
+            samples
+                .entry((crate::models::canonical_slug(hf_id), quant.to_lowercase()))
+                .or_default()
+                .push(tok_s);
+        }
+        if samples.is_empty() {
+            return None;
+        }
+        for s in samples.values_mut() {
+            s.sort_by(|a, b| a.partial_cmp(b).expect("tok/s samples are finite"));
+        }
+        Some(Self {
+            hardware_label,
+            samples,
+        })
+    }
+
+    /// Median measured tok/s for this model+quant, if any comparable runs
+    /// exist on the matched hardware.
+    pub fn lookup(&self, model_hf_id: &str, quant: &str) -> Option<MeasuredTps> {
+        let key = (
+            crate::models::canonical_slug(model_hf_id),
+            quant.to_lowercase(),
+        );
+        let s = self.samples.get(&key)?;
+        let n = s.len();
+        let median = if n % 2 == 1 {
+            s[n / 2]
+        } else {
+            (s[n / 2 - 1] + s[n / 2]) / 2.0
+        };
+        Some(MeasuredTps {
+            tok_s: median,
+            sample_count: n as u32,
+            hardware_label: self.hardware_label.to_string(),
+        })
+    }
+}
+
+/// One-shot lookup: median measured tok/s for `model_hf_id` at `quant` on
+/// hardware matching the detected specs. Prefer [`MeasuredTpsIndex`] when
+/// annotating many fits.
+pub fn measured_tps_for(
+    specs: &SystemSpecs,
+    model_hf_id: &str,
+    quant: &str,
+) -> Option<MeasuredTps> {
+    MeasuredTpsIndex::for_specs(specs)?.lookup(model_hf_id, quant)
+}
+
 // ── Fetch functions ──────────────────────────────────────────────────
 
 /// Fetch benchmarks matching the user's hardware.
@@ -695,4 +810,58 @@ fn urlencoded(s: &str) -> String {
         }
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn row(json: &str) -> LeaderboardEntry {
+        serde_json::from_str(json).expect("valid test row")
+    }
+
+    #[test]
+    fn test_measured_index_median_and_comparability_filters() {
+        let rows = vec![
+            row(
+                r#"{"id":"1","tokSOut":100.0,"model":{"hfId":"unsloth/Qwen3-4B-GGUF"},"engine":{"engineName":"llama.cpp","quantization":"Q4_K_M"}}"#,
+            ),
+            row(
+                r#"{"id":"2","tokSOut":120.0,"model":{"hfId":"unsloth/Qwen3-4B-GGUF"},"engine":{"engineName":"llama.cpp","quantization":"Q4_K_M"}}"#,
+            ),
+            // Batched serving measures a different quantity — excluded.
+            row(
+                r#"{"id":"3","tokSOut":900.0,"batchSize":8,"model":{"hfId":"unsloth/Qwen3-4B-GGUF"},"engine":{"engineName":"vllm","quantization":"Q4_K_M"}}"#,
+            ),
+            // Draft-accelerated runs beat the roofline — excluded.
+            row(
+                r#"{"id":"4","tokSOut":500.0,"engineFlags":{"specDecoding":true},"model":{"hfId":"unsloth/Qwen3-4B-GGUF"},"engine":{"engineName":"llama.cpp","quantization":"Q4_K_M"}}"#,
+            ),
+        ];
+        let idx = MeasuredTpsIndex::from_rows(&rows, "RTX 3090 (24 GB)")
+            .expect("comparable rows should build an index");
+
+        let m = idx
+            .lookup("unsloth/Qwen3-4B-GGUF", "q4_k_m")
+            .expect("quant match is case-insensitive");
+        assert_eq!(
+            m.sample_count, 2,
+            "batched/spec-decoding rows must not count"
+        );
+        assert!((m.tok_s - 110.0).abs() < 1e-9, "median of 100 and 120");
+        assert_eq!(m.hardware_label, "RTX 3090 (24 GB)");
+
+        assert!(
+            idx.lookup("unsloth/Qwen3-4B-GGUF", "Q8_0").is_none(),
+            "different quant must not match"
+        );
+    }
+
+    #[test]
+    fn test_measured_index_none_when_no_comparable_rows() {
+        let rows = vec![row(
+            r#"{"id":"1","tokSOut":900.0,"batchSize":16,"model":{"hfId":"a/b"},"engine":{"engineName":"vllm","quantization":"FP8"}}"#,
+        )];
+        assert!(MeasuredTpsIndex::from_rows(&rows, "A100 (80 GB)").is_none());
+    }
 }
