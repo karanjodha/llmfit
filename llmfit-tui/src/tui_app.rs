@@ -5252,6 +5252,10 @@ mod tests {
     fn bench_offer_share_toggle_and_dismiss() {
         let mut app = app_with_installed_model(true);
         app.open_benchmarks();
+        // open_benchmarks probes for real GitHub credentials (env token or
+        // cached login), which differ between dev machines and CI runners —
+        // pin the outcome so the toggle path is deterministic.
+        app.bench_offer_share_unavailable = None;
         assert!(!app.bench_offer_share);
         app.bench_offer_toggle_share();
         assert!(app.bench_offer_share);
@@ -5262,6 +5266,15 @@ mod tests {
         app.bench_offer_dismiss();
         assert_eq!(app.input_mode, InputMode::Benchmarks);
         assert!(app.show_benchmarks);
+    }
+
+    #[test]
+    fn bench_offer_share_toggle_noop_without_credentials() {
+        let mut app = app_with_installed_model(true);
+        app.open_benchmarks();
+        app.bench_offer_share_unavailable = Some("no GitHub credentials".to_string());
+        app.bench_offer_toggle_share();
+        assert!(!app.bench_offer_share);
     }
 
     #[test]
