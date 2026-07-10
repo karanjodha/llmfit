@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.1.2](https://github.com/AlexsJones/llmfit/compare/v1.1.1...v1.1.2) (2026-07-10)
+
+
+### Features
+
+* **share:** ship the registered OAuth App client id — interactive login enabled ([a94ffcb](https://github.com/AlexsJones/llmfit/commit/a94ffcbe9412f0974224c87290ae01f89d01e009))
+* **share:** ship the registered OAuth App client id — interactive login enabled ([325f8a3](https://github.com/AlexsJones/llmfit/commit/325f8a3ff34adf0772990335e93f1efad212d735))
+
 ## [1.1.1](https://github.com/AlexsJones/llmfit/compare/v1.1.0...v1.1.1) (2026-07-10)
 
 
