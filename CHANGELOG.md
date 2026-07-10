@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.1.1](https://github.com/AlexsJones/llmfit/compare/v1.1.0...v1.1.1) (2026-07-10)
+
+
+### Features
+
+* **bench:** ship merged community benchmarks to every user in the next release ([f2fd476](https://github.com/AlexsJones/llmfit/commit/f2fd47672ff1b81bacdba3169e163f235a32070a))
+* **bench:** ship merged community benchmarks to every user in the next release ([5c46f92](https://github.com/AlexsJones/llmfit/commit/5c46f92a2411edbfa7a829cc0e4c92f355189d76))
+
 ## [1.1.0](https://github.com/AlexsJones/llmfit/compare/v1.0.1...v1.1.0) (2026-07-10)
 
 
