@@ -123,6 +123,7 @@ pub enum InputMode {
     DownloadManager,
     FilterPopup,
     Benchmarks,
+    BenchOffer,
 }
 
 /// Fields in the Filter Popup modal.
@@ -316,6 +317,254 @@ pub enum BenchMsg {
     },
     ModelDone(quality::ModelQualityResult),
     AllDone,
+}
+
+/// Messages sent from the bench-offer worker thread (benchmark of the
+/// selected model, plus the optional share-as-PR flow) to the UI.
+pub enum BenchOfferMsg {
+    Progress(String),
+    /// GitHub device-flow authorization needed: show code + URL in the modal.
+    AuthCode {
+        user_code: String,
+        verification_uri: String,
+    },
+    Done {
+        summary: String,
+        pr_url: Option<String>,
+        /// Set when the bench succeeded but the share step failed/was skipped.
+        share_note: Option<String>,
+    },
+    Error(String),
+}
+
+/// UI state of the bench-offer modal.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BenchOfferState {
+    /// Waiting for the user to confirm, toggle share, or dismiss.
+    Offer,
+    /// Worker thread is benchmarking (and possibly sharing).
+    Running,
+    /// Finished — summary (and PR URL, if shared) is displayed.
+    Done,
+    /// Failed — error message is displayed.
+    Error,
+}
+
+/// Match a running provider's model tag against an HF-style model name,
+/// reusing the same heuristics as the installed-column detection.
+///
+/// Two deliberately separate passes: Ollama-style candidate matching runs
+/// only against the verbatim id, while file paths reported by llama-server
+/// (".../gemma-3.Q8_0.gguf") get exact stem matching only — feeding a bare
+/// stem into the Ollama candidate heuristics would match whole families.
+fn bench_target_matches(target_model: &str, hf_name: &str) -> bool {
+    let lower = target_model.to_lowercase();
+
+    let mut tag_set = HashSet::new();
+    tag_set.insert(lower.clone());
+    if llmfit_core::providers::is_model_installed(hf_name, &tag_set) {
+        return true;
+    }
+
+    let stem = lower
+        .rsplit(['/', '\\'])
+        .next()
+        .unwrap_or(&lower)
+        .trim_end_matches(".gguf")
+        .to_string();
+    let mut stem_set = HashSet::new();
+    if let Some(base) = llmfit_core::providers::strip_gguf_quant_suffix(&stem) {
+        stem_set.insert(base);
+    }
+    stem_set.insert(stem);
+    llmfit_core::providers::is_model_installed_llamacpp(hf_name, &stem_set)
+}
+
+/// Body of the bench-offer worker thread: find the selected model on a running
+/// provider, benchmark it, and optionally share the result as a PR. All
+/// user-visible output goes through `tx` — never stdout/stderr (the TUI owns
+/// the terminal).
+fn bench_offer_worker(
+    tx: &mpsc::Sender<BenchOfferMsg>,
+    model_name: &str,
+    share: bool,
+    specs: &SystemSpecs,
+) {
+    use llmfit_core::bench::{self, BenchTarget};
+    use llmfit_core::share;
+
+    let targets = bench::discover_all_targets();
+    let target = targets.into_iter().find(|t| {
+        let model = match t {
+            BenchTarget::Ollama { model, .. }
+            | BenchTarget::VLlm { model, .. }
+            | BenchTarget::Mlx { model, .. }
+            | BenchTarget::LlamaCpp { model, .. } => model,
+        };
+        bench_target_matches(model, model_name)
+    });
+    let Some(target) = target else {
+        let _ = tx.send(BenchOfferMsg::Error(format!(
+            "{} is installed but not served by any running provider",
+            model_name
+        )));
+        return;
+    };
+
+    const RUNS: usize = 3;
+    let (provider, url, tag) = match &target {
+        BenchTarget::Ollama { url, model } => ("ollama", url, model),
+        BenchTarget::VLlm { url, model } => ("vllm", url, model),
+        BenchTarget::Mlx { url, model } => ("mlx", url, model),
+        BenchTarget::LlamaCpp { url, model } => ("llamacpp", url, model),
+    };
+
+    // llama-server reports file paths as model ids — display just the stem.
+    let display_tag = tag
+        .rsplit(['/', '\\'])
+        .next()
+        .unwrap_or(tag)
+        .trim_end_matches(".gguf")
+        .to_string();
+
+    let progress_tx = tx.clone();
+    let tag_for_progress = display_tag.clone();
+    let on_progress = move |i: usize, total: usize| {
+        let msg = if i == 0 {
+            format!("Warming up {}...", tag_for_progress)
+        } else {
+            format!("Benchmarking {} — run {}/{}", tag_for_progress, i, total)
+        };
+        let _ = progress_tx.send(BenchOfferMsg::Progress(msg));
+    };
+
+    let result = match &target {
+        BenchTarget::Ollama { url: u, model } => bench::bench_ollama(u, model, RUNS, &on_progress),
+        BenchTarget::VLlm { url: u, model } => {
+            bench::bench_openai_compat(u, model, "vllm", RUNS, &on_progress)
+        }
+        BenchTarget::Mlx { url: u, model } => {
+            bench::bench_openai_compat(u, model, "mlx", RUNS, &on_progress)
+        }
+        BenchTarget::LlamaCpp { url: u, model } => {
+            bench::bench_openai_compat(u, model, "llamacpp", RUNS, &on_progress)
+        }
+    };
+
+    let result = match result {
+        Ok(r) => r,
+        Err(e) => {
+            let _ = tx.send(BenchOfferMsg::Error(format!(
+                "benchmark via {} at {} failed: {}",
+                provider, url, e
+            )));
+            return;
+        }
+    };
+
+    let ttft = result
+        .summary
+        .avg_ttft_ms
+        .map(|v| format!("{:.0} ms TTFT, ", v))
+        .unwrap_or_default();
+    let summary = format!(
+        "{}: {:.1} tok/s avg ({:.1}–{:.1}), {}{} runs via {}",
+        display_tag,
+        result.summary.avg_tps,
+        result.summary.min_tps,
+        result.summary.max_tps,
+        ttft,
+        result.summary.num_runs,
+        provider,
+    );
+
+    if !share {
+        let _ = tx.send(BenchOfferMsg::Done {
+            summary,
+            pr_url: None,
+            share_note: None,
+        });
+        return;
+    }
+
+    // Share flow: cached/env token first, then interactive device flow with
+    // the code rendered inside the modal.
+    let _ = tx.send(BenchOfferMsg::Progress("Sharing with llmfit...".into()));
+    let token = match share::resolve_token_noninteractive() {
+        Some(t) => t,
+        None => {
+            let Some(client_id) = share::oauth_client_id() else {
+                let _ = tx.send(BenchOfferMsg::Done {
+                    summary,
+                    pr_url: None,
+                    share_note: Some(
+                        "Share skipped: no GitHub token. Set GITHUB_TOKEN or run \
+                         `llmfit bench --share` once to log in."
+                            .into(),
+                    ),
+                });
+                return;
+            };
+            let auth = match share::device_flow_start(&client_id) {
+                Ok(a) => a,
+                Err(e) => {
+                    let _ = tx.send(BenchOfferMsg::Done {
+                        summary,
+                        pr_url: None,
+                        share_note: Some(format!("Share skipped: {}", e)),
+                    });
+                    return;
+                }
+            };
+            let _ = tx.send(BenchOfferMsg::AuthCode {
+                user_code: auth.user_code.clone(),
+                verification_uri: auth.verification_uri.clone(),
+            });
+            let mut interval = auth.interval;
+            loop {
+                thread::sleep(std::time::Duration::from_secs(interval + 1));
+                match share::device_flow_poll(&client_id, &auth.device_code) {
+                    Ok(share::DevicePoll::Token(t)) => {
+                        let _ = share::cache_token(&t);
+                        break t;
+                    }
+                    Ok(share::DevicePoll::Pending) => continue,
+                    Ok(share::DevicePoll::SlowDown) => {
+                        interval += 5;
+                        continue;
+                    }
+                    Ok(share::DevicePoll::Failed(e)) | Err(e) => {
+                        let _ = tx.send(BenchOfferMsg::Done {
+                            summary,
+                            pr_url: None,
+                            share_note: Some(format!("Share skipped: {}", e)),
+                        });
+                        return;
+                    }
+                }
+            }
+        }
+    };
+
+    let _ = tx.send(BenchOfferMsg::Progress(
+        "Opening pull request on GitHub...".into(),
+    ));
+    match share::submit_results(std::slice::from_ref(&result), specs, &token) {
+        Ok(pr_url) => {
+            let _ = tx.send(BenchOfferMsg::Done {
+                summary,
+                pr_url: Some(pr_url),
+                share_note: None,
+            });
+        }
+        Err(e) => {
+            let _ = tx.send(BenchOfferMsg::Done {
+                summary,
+                pr_url: None,
+                share_note: Some(format!("Share failed: {}", e)),
+            });
+        }
+    }
 }
 
 /// Per-model bench status for the live dashboard rows.
@@ -756,6 +1005,22 @@ pub struct App {
     pub bench_tests_done: usize,
     pub bench_tests_total: usize,
     bench_rx: Option<mpsc::Receiver<BenchMsg>>,
+
+    // Bench-offer modal (benchmark the selected model, optionally share as PR)
+    pub bench_offer_state: BenchOfferState,
+    pub bench_offer_share: bool,
+    /// HF-style name of the model being offered for benchmark.
+    pub bench_offer_model: String,
+    /// Providers that have the model installed (display names).
+    pub bench_offer_providers: Vec<&'static str>,
+    pub bench_offer_progress: String,
+    /// Device-flow authorization prompt: (user_code, verification_uri).
+    pub bench_offer_auth: Option<(String, String)>,
+    pub bench_offer_summary: Option<String>,
+    pub bench_offer_pr_url: Option<String>,
+    pub bench_offer_share_note: Option<String>,
+    pub bench_offer_error: Option<String>,
+    bench_offer_rx: Option<mpsc::Receiver<BenchOfferMsg>>,
 
     // Background provider detection
     provider_detection_rx: mpsc::Receiver<ProviderDetectionMsg>,
@@ -1200,6 +1465,18 @@ impl App {
             bench_tests_done: 0,
             bench_tests_total: 0,
             bench_rx: None,
+            // Bench-offer modal
+            bench_offer_state: BenchOfferState::Offer,
+            bench_offer_share: false,
+            bench_offer_model: String::new(),
+            bench_offer_providers: Vec::new(),
+            bench_offer_progress: String::new(),
+            bench_offer_auth: None,
+            bench_offer_summary: None,
+            bench_offer_pr_url: None,
+            bench_offer_share_note: None,
+            bench_offer_error: None,
+            bench_offer_rx: None,
             provider_detection_rx,
             providers_loading: true,
         };
@@ -2031,6 +2308,28 @@ impl App {
         self.bench_cursor = 0;
         self.bench_scroll = 0;
 
+        // If the selected model is installed and a provider has it, offer to
+        // benchmark it (with optional share-as-PR) before showing the board.
+        if self.bench_offer_rx.is_none()
+            && let Some(fit) = self.selected_fit()
+            && fit.installed
+        {
+            let name = fit.model.name.clone();
+            let providers = self.installed.installed_providers(&name);
+            if !providers.is_empty() {
+                self.bench_offer_state = BenchOfferState::Offer;
+                self.bench_offer_model = name;
+                self.bench_offer_providers = providers;
+                self.bench_offer_progress = String::new();
+                self.bench_offer_auth = None;
+                self.bench_offer_summary = None;
+                self.bench_offer_pr_url = None;
+                self.bench_offer_share_note = None;
+                self.bench_offer_error = None;
+                self.input_mode = InputMode::BenchOffer;
+            }
+        }
+
         // Fetch if we don't have data yet
         if self.bench_entries.is_empty() && !self.bench_loading {
             self.fetch_benchmarks();
@@ -2040,6 +2339,79 @@ impl App {
     pub fn close_benchmarks(&mut self) {
         self.show_benchmarks = false;
         self.input_mode = InputMode::Normal;
+    }
+
+    /// Toggle the "share with llmfit" checkbox in the bench-offer modal.
+    pub fn bench_offer_toggle_share(&mut self) {
+        self.bench_offer_share = !self.bench_offer_share;
+    }
+
+    /// Dismiss the bench-offer modal and drop into the leaderboard view. A
+    /// still-running worker is detached: its receiver is dropped and its sends
+    /// fail silently.
+    pub fn bench_offer_dismiss(&mut self) {
+        self.bench_offer_rx = None;
+        self.bench_offer_state = BenchOfferState::Offer;
+        self.input_mode = InputMode::Benchmarks;
+    }
+
+    /// Start the bench(+share) worker for the offered model.
+    pub fn bench_offer_confirm(&mut self) {
+        if self.bench_offer_state != BenchOfferState::Offer {
+            return;
+        }
+        let model_name = self.bench_offer_model.clone();
+        let share = self.bench_offer_share;
+        // Share real hardware, never simulated specs.
+        let specs = self.real_specs.clone();
+
+        let (tx, rx) = mpsc::channel::<BenchOfferMsg>();
+        self.bench_offer_rx = Some(rx);
+        self.bench_offer_state = BenchOfferState::Running;
+        self.bench_offer_progress = "Detecting providers...".to_string();
+
+        thread::spawn(move || {
+            bench_offer_worker(&tx, &model_name, share, &specs);
+        });
+    }
+
+    /// Drain bench-offer worker messages (called every frame, non-blocking).
+    pub fn tick_bench_offer(&mut self) {
+        let mut finished = false;
+        if let Some(rx) = &self.bench_offer_rx {
+            while let Ok(msg) = rx.try_recv() {
+                match msg {
+                    BenchOfferMsg::Progress(s) => self.bench_offer_progress = s,
+                    BenchOfferMsg::AuthCode {
+                        user_code,
+                        verification_uri,
+                    } => {
+                        self.bench_offer_auth = Some((user_code, verification_uri));
+                    }
+                    BenchOfferMsg::Done {
+                        summary,
+                        pr_url,
+                        share_note,
+                    } => {
+                        self.bench_offer_state = BenchOfferState::Done;
+                        self.bench_offer_summary = Some(summary);
+                        self.bench_offer_pr_url = pr_url;
+                        self.bench_offer_share_note = share_note;
+                        self.bench_offer_auth = None;
+                        finished = true;
+                    }
+                    BenchOfferMsg::Error(e) => {
+                        self.bench_offer_state = BenchOfferState::Error;
+                        self.bench_offer_error = Some(e);
+                        self.bench_offer_auth = None;
+                        finished = true;
+                    }
+                }
+            }
+        }
+        if finished {
+            self.bench_offer_rx = None;
+        }
     }
 
     pub fn fetch_benchmarks(&mut self) {
@@ -4668,5 +5040,82 @@ mod tests {
         app.search_input('z');
         assert!(app.filtered_fits.is_empty());
         assert_eq!(app.selected_row, 0);
+    }
+
+    /// Build an app with one installed model, primed so open_benchmarks
+    /// skips the network fetch (bench_loading = true).
+    fn app_with_installed_model(installed: bool) -> App {
+        let mut app = test_app();
+        let mut fit = test_fit("test/llama-3.1-8b", FitLevel::Perfect, 90.0);
+        fit.installed = installed;
+        app.all_fits = vec![fit];
+        app.filtered_fits = vec![0];
+        app.selected_row = 0;
+        if installed {
+            app.installed.ollama.insert("test/llama-3.1-8b".to_string());
+        }
+        app.bench_loading = true; // skip leaderboard fetch in tests
+        app
+    }
+
+    #[test]
+    fn open_benchmarks_offers_bench_for_installed_model() {
+        let mut app = app_with_installed_model(true);
+        app.open_benchmarks();
+        assert_eq!(app.input_mode, InputMode::BenchOffer);
+        assert_eq!(app.bench_offer_state, BenchOfferState::Offer);
+        assert_eq!(app.bench_offer_model, "test/llama-3.1-8b");
+        assert_eq!(app.bench_offer_providers, vec!["Ollama"]);
+        assert!(app.show_benchmarks);
+    }
+
+    #[test]
+    fn open_benchmarks_skips_offer_for_uninstalled_model() {
+        let mut app = app_with_installed_model(false);
+        app.open_benchmarks();
+        assert_eq!(app.input_mode, InputMode::Benchmarks);
+    }
+
+    #[test]
+    fn bench_offer_share_toggle_and_dismiss() {
+        let mut app = app_with_installed_model(true);
+        app.open_benchmarks();
+        assert!(!app.bench_offer_share);
+        app.bench_offer_toggle_share();
+        assert!(app.bench_offer_share);
+        app.bench_offer_toggle_share();
+        assert!(!app.bench_offer_share);
+
+        // Dismiss drops into the leaderboard view, not back to Normal.
+        app.bench_offer_dismiss();
+        assert_eq!(app.input_mode, InputMode::Benchmarks);
+        assert!(app.show_benchmarks);
+    }
+
+    #[test]
+    fn bench_target_matching_reuses_installed_heuristics() {
+        // Exact HF name (as MLX/vLLM report it)
+        assert!(bench_target_matches(
+            "meta-llama/Llama-3.1-8B-Instruct",
+            "meta-llama/Llama-3.1-8B-Instruct"
+        ));
+        // Real Ollama tag resolved through the mapping table
+        assert!(bench_target_matches("llama3.1:8b", "test/llama-3.1-8b"));
+        // Variant tag reported by `ollama list` (quant suffix)
+        assert!(bench_target_matches(
+            "llama3.1:8b-instruct-q4_K_M",
+            "test/llama-3.1-8b"
+        ));
+        // llama-server style: model id is a file path with quant suffix
+        assert!(bench_target_matches(
+            "/home/user/.cache/llmfit/models/gemma-3.Q8_0.gguf",
+            "tiny-random/gemma-3"
+        ));
+        // Unrelated models must not match
+        assert!(!bench_target_matches("qwen2.5:7b", "test/llama-3.1-8b"));
+        assert!(!bench_target_matches(
+            "/home/user/.cache/llmfit/models/gemma-3.Q8_0.gguf",
+            "google/gemma-3-27b-it"
+        ));
     }
 }

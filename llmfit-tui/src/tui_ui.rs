@@ -12,9 +12,9 @@ use ratatui::{
 use crate::download_history::DownloadResult;
 use crate::theme::ThemeColors;
 use crate::tui_app::{
-    AdvConfigField, App, AvailabilityFilter, BenchViewMode, DL_DOCKER, DL_LLAMACPP, DL_LMSTUDIO,
-    DL_OLLAMA, DL_VLLM, DownloadCapability, DownloadManagerFocus, DownloadProvider, FitFilter,
-    InputMode, PlanField, SimulationField,
+    AdvConfigField, App, AvailabilityFilter, BenchOfferState, BenchViewMode, DL_DOCKER,
+    DL_LLAMACPP, DL_LMSTUDIO, DL_OLLAMA, DL_VLLM, DownloadCapability, DownloadManagerFocus,
+    DownloadProvider, FitFilter, InputMode, PlanField, SimulationField,
 };
 use llmfit_core::fit::{FitLevel, ModelFit, SortColumn};
 use llmfit_core::hardware::is_running_in_wsl;
@@ -92,6 +92,8 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
         draw_advanced_config_popup(frame, app, &tc);
     } else if app.input_mode == InputMode::FilterPopup {
         draw_filter_popup(frame, app, &tc);
+    } else if app.input_mode == InputMode::BenchOffer {
+        draw_bench_offer_popup(frame, app, &tc);
     }
 }
 
@@ -412,7 +414,8 @@ fn draw_search_and_filters(frame: &mut Frame, app: &App, area: Rect, tc: &ThemeC
         | InputMode::AdvancedConfig
         | InputMode::DownloadManager
         | InputMode::FilterPopup
-        | InputMode::Benchmarks => Style::default().fg(tc.muted),
+        | InputMode::Benchmarks
+        | InputMode::BenchOffer => Style::default().fg(tc.muted),
     };
 
     let search_inner_width = chunks[0].width.saturating_sub(2) as usize;
@@ -3048,6 +3051,10 @@ fn status_keys_and_mode(app: &App) -> (String, String) {
             " ↑/k:up  ↓/j:down  H:change GPU  r:refresh  b/q/Esc:close".to_string(),
             "COMMUNITY LEADERBOARD".to_string(),
         ),
+        InputMode::BenchOffer => (
+            " Enter:run  Space:share toggle  Esc:skip".to_string(),
+            "BENCHMARK".to_string(),
+        ),
     }
 }
 
@@ -3369,6 +3376,140 @@ fn draw_params_bucket_popup(frame: &mut Frame, app: &App, tc: &ThemeColors) {
         );
 
     let paragraph = Paragraph::new(lines).block(block);
+    frame.render_widget(paragraph, popup_area);
+}
+
+fn draw_bench_offer_popup(frame: &mut Frame, app: &App, tc: &ThemeColors) {
+    let area = frame.area();
+
+    let popup_width = 64.min(area.width.saturating_sub(4));
+    let popup_height = 14.min(area.height.saturating_sub(4));
+    let x = area.x + (area.width.saturating_sub(popup_width)) / 2;
+    let y = area.y + (area.height.saturating_sub(popup_height)) / 2;
+    let popup_area = Rect::new(x, y, popup_width, popup_height);
+
+    frame.render_widget(Clear, popup_area);
+
+    let mut lines: Vec<Line> = vec![
+        Line::from(""),
+        Line::from(vec![
+            Span::styled("  Model:    ", Style::default().fg(tc.muted)),
+            Span::styled(
+                app.bench_offer_model.clone(),
+                Style::default().fg(tc.fg).add_modifier(Modifier::BOLD),
+            ),
+        ]),
+        Line::from(vec![
+            Span::styled("  Provider: ", Style::default().fg(tc.muted)),
+            Span::styled(
+                app.bench_offer_providers.join(", "),
+                Style::default().fg(tc.fg),
+            ),
+        ]),
+        Line::from(""),
+    ];
+
+    match app.bench_offer_state {
+        BenchOfferState::Offer => {
+            let (mark, mark_style) = if app.bench_offer_share {
+                (
+                    "[x]",
+                    Style::default().fg(tc.good).add_modifier(Modifier::BOLD),
+                )
+            } else {
+                ("[ ]", Style::default().fg(tc.muted))
+            };
+            lines.push(Line::from(vec![
+                Span::styled(format!("  {mark} "), mark_style),
+                Span::styled("Share with llmfit ", Style::default().fg(tc.fg)),
+                Span::styled(
+                    "(opens a PR with your results)",
+                    Style::default().fg(tc.muted),
+                ),
+            ]));
+            lines.push(Line::from(""));
+            lines.push(Line::from(Span::styled(
+                "  [Enter] Run   [Space] Toggle share   [Esc] Skip",
+                Style::default().fg(tc.muted),
+            )));
+        }
+        BenchOfferState::Running => {
+            lines.push(Line::from(Span::styled(
+                format!("  {}", app.bench_offer_progress),
+                Style::default().fg(tc.info),
+            )));
+            if let Some((code, url)) = &app.bench_offer_auth {
+                lines.push(Line::from(""));
+                lines.push(Line::from(Span::styled(
+                    "  Authorize on GitHub to share:",
+                    Style::default().fg(tc.fg),
+                )));
+                lines.push(Line::from(vec![
+                    Span::styled("    Open ", Style::default().fg(tc.muted)),
+                    Span::styled(url.clone(), Style::default().fg(tc.accent)),
+                    Span::styled("  and enter code ", Style::default().fg(tc.muted)),
+                    Span::styled(
+                        code.clone(),
+                        Style::default().fg(tc.accent).add_modifier(Modifier::BOLD),
+                    ),
+                ]));
+            }
+            lines.push(Line::from(""));
+            lines.push(Line::from(Span::styled(
+                "  [Esc] Continue in background",
+                Style::default().fg(tc.muted),
+            )));
+        }
+        BenchOfferState::Done => {
+            if let Some(summary) = &app.bench_offer_summary {
+                lines.push(Line::from(Span::styled(
+                    format!("  {}", summary),
+                    Style::default().fg(tc.good),
+                )));
+            }
+            if let Some(url) = &app.bench_offer_pr_url {
+                lines.push(Line::from(vec![
+                    Span::styled("  PR opened: ", Style::default().fg(tc.fg)),
+                    Span::styled(url.clone(), Style::default().fg(tc.accent)),
+                ]));
+            }
+            if let Some(note) = &app.bench_offer_share_note {
+                lines.push(Line::from(Span::styled(
+                    format!("  {}", note),
+                    Style::default().fg(tc.warning),
+                )));
+            }
+            lines.push(Line::from(""));
+            lines.push(Line::from(Span::styled(
+                "  [Enter] Continue to leaderboard",
+                Style::default().fg(tc.muted),
+            )));
+        }
+        BenchOfferState::Error => {
+            if let Some(e) = &app.bench_offer_error {
+                lines.push(Line::from(Span::styled(
+                    format!("  {}", e),
+                    Style::default().fg(tc.error),
+                )));
+            }
+            lines.push(Line::from(""));
+            lines.push(Line::from(Span::styled(
+                "  [Enter] Continue to leaderboard",
+                Style::default().fg(tc.muted),
+            )));
+        }
+    }
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(tc.border))
+        .title(Span::styled(
+            " Benchmark this model ",
+            Style::default().fg(tc.title).add_modifier(Modifier::BOLD),
+        ));
+    let paragraph = Paragraph::new(lines)
+        .block(block)
+        .wrap(Wrap { trim: false });
     frame.render_widget(paragraph, popup_area);
 }
 

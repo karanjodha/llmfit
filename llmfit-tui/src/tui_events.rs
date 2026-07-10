@@ -5,9 +5,10 @@ use crate::tui_app::{App, InputMode};
 
 /// Poll for and handle events. Returns true if an event was processed.
 pub fn handle_events(app: &mut App) -> std::io::Result<bool> {
-    // Always tick the pull progress and live-bench worker messages (non-blocking)
+    // Always tick the pull progress and worker messages (non-blocking)
     app.tick_pull();
     app.tick_bench();
+    app.tick_bench_offer();
 
     if event::poll(Duration::from_millis(50))?
         && let Event::Key(key) = event::read()?
@@ -37,6 +38,7 @@ pub fn handle_events(app: &mut App) -> std::io::Result<bool> {
             InputMode::DownloadManager => handle_download_manager_mode(app, key),
             InputMode::FilterPopup => handle_filter_popup_mode(app, key),
             InputMode::Benchmarks => handle_benchmarks_mode(app, key),
+            InputMode::BenchOffer => handle_bench_offer_mode(app, key),
         }
         return Ok(true);
     }
@@ -702,6 +704,28 @@ fn handle_filter_popup_mode(app: &mut App, key: KeyEvent) {
         KeyCode::Char(c) if c.is_ascii_digit() || c == '.' => app.filter_input(c),
 
         _ => {}
+    }
+}
+
+fn handle_bench_offer_mode(app: &mut App, key: KeyEvent) {
+    use crate::tui_app::BenchOfferState;
+    match app.bench_offer_state {
+        BenchOfferState::Offer => match key.code {
+            KeyCode::Enter => app.bench_offer_confirm(),
+            KeyCode::Char(' ') | KeyCode::Char('s') => app.bench_offer_toggle_share(),
+            KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char('n') => app.bench_offer_dismiss(),
+            _ => {}
+        },
+        // While running, Esc detaches the worker and drops to the leaderboard.
+        BenchOfferState::Running => {
+            if key.code == KeyCode::Esc {
+                app.bench_offer_dismiss();
+            }
+        }
+        BenchOfferState::Done | BenchOfferState::Error => match key.code {
+            KeyCode::Enter | KeyCode::Esc | KeyCode::Char('q') => app.bench_offer_dismiss(),
+            _ => {}
+        },
     }
 }
 

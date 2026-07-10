@@ -2627,6 +2627,7 @@ dependencies = [
 name = "llmfit-core"
 version = "1.0.1"
 dependencies = [
+ "base64 0.22.1",
  "dirs",
  "http",
  "jsonschema",

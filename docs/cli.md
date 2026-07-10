@@ -95,6 +95,41 @@ python3 scripts/test_api.py --spawn
 python3 scripts/test_api.py --base-url http://127.0.0.1:8787
 ```
 
+### Contributing benchmarks (`bench --share`)
+
+`llmfit bench` measures inference performance against a running provider
+(Ollama, vLLM, MLX, or llama-server). llama-server is auto-detected on port
+8080 via its `/props` endpoint (override with `LLAMA_SERVER_HOST` for a full
+URL, or `LLAMA_SERVER_PORT`), or select it explicitly with
+`--provider llamacpp`. Add `--share` to contribute your results back to the
+project as a pull request — **no `gh` CLI and no account on a third-party
+service required**:
+
+```sh
+# Benchmark every discovered model and open a PR with the results
+llmfit bench --all --share
+
+# Preview the exact JSON payload without contacting GitHub
+llmfit bench --all --share --dry-run
+
+# Skip the confirmation prompt (e.g. for automation)
+llmfit bench --all --share --yes
+```
+
+Authentication uses the GitHub **device flow** (the same mechanism
+`gh auth login` uses): llmfit prints a short code and a URL, you approve it in
+your browser once, and the token is cached under `~/.config/llmfit/` for next
+time. If a `GITHUB_TOKEN` or `GH_TOKEN` environment variable is set (or you use
+CI), that token is used automatically and no browser step is needed.
+
+`--share` then forks the repo, commits a single result file under
+`llmfit-core/data/community/<hardware>/`, and opens a pull request. Nothing is
+submitted until you confirm, and `--dry-run` never touches the network.
+
+> Interactive login requires `LLMFIT_GH_CLIENT_ID` to be set to a registered
+> GitHub OAuth App client id. Until one is configured, use a `GITHUB_TOKEN` /
+> `GH_TOKEN` with `public_repo` scope.
+
 ### Hardware overrides
 
 Hardware autodetection can fail on some systems (e.g. broken `nvidia-smi`, VMs, passthrough setups), or you may want to evaluate model fit against different target hardware. Use `--memory`, `--ram`, and `--cpu-cores` to override detected values:

@@ -339,6 +339,32 @@ pub enum BenchTarget {
     Ollama { url: String, model: String },
     VLlm { url: String, model: String },
     Mlx { url: String, model: String },
+    LlamaCpp { url: String, model: String },
+}
+
+/// Base URL for a running llama-server instance.
+/// `LLAMA_SERVER_HOST` (full URL) wins; otherwise localhost with
+/// `LLAMA_SERVER_PORT` (default 8080, llama-server's own default).
+pub fn llamacpp_url() -> String {
+    if let Ok(host) = std::env::var("LLAMA_SERVER_HOST")
+        && !host.trim().is_empty()
+    {
+        return host.trim().trim_end_matches('/').to_string();
+    }
+    let port = std::env::var("LLAMA_SERVER_PORT").unwrap_or_else(|_| "8080".to_string());
+    format!("http://localhost:{}", port)
+}
+
+/// Positively identify a llama-server instance via its `/props` endpoint.
+/// llama.cpp serves it; MLX and vLLM return 404, which disambiguates
+/// llama-server from `mlx_lm.server` on the shared default port 8080.
+pub fn probe_llamacpp(base_url: &str) -> bool {
+    ureq::get(&format!("{}/props", base_url.trim_end_matches('/')))
+        .config()
+        .timeout_global(Some(Duration::from_secs(2)))
+        .build()
+        .call()
+        .is_ok()
 }
 
 /// Auto-detect available providers and pick the best one to benchmark.
@@ -370,6 +396,18 @@ pub fn auto_detect_target(model_hint: Option<&str>) -> Result<BenchTarget, Strin
         });
     }
 
+    // Check llama-server before MLX: both default to port 8080, but only
+    // llama.cpp answers /props, so it can be identified positively.
+    let llama_url = llamacpp_url();
+    if probe_llamacpp(&llama_url)
+        && let Ok(model_name) = detect_openai_model(&llama_url, model_hint)
+    {
+        return Ok(BenchTarget::LlamaCpp {
+            url: llama_url,
+            model: model_name,
+        });
+    }
+
     // Check MLX
     let mlx_url =
         std::env::var("MLX_LM_HOST").unwrap_or_else(|_| "http://localhost:8080".to_string());
@@ -387,7 +425,7 @@ pub fn auto_detect_target(model_hint: Option<&str>) -> Result<BenchTarget, Strin
         });
     }
 
-    Err("No inference provider found. Start Ollama, vLLM, or MLX first.".to_string())
+    Err("No inference provider found. Start Ollama, vLLM, MLX, or llama-server first.".to_string())
 }
 
 /// Discover all available models across all providers.
@@ -418,10 +456,26 @@ pub fn discover_all_targets() -> Vec<BenchTarget> {
         }
     }
 
-    // Check MLX
+    // Check llama-server before MLX: both default to port 8080, but only
+    // llama.cpp answers /props, so it can be identified positively.
+    let llama_url = llamacpp_url();
+    let llamacpp_found = probe_llamacpp(&llama_url);
+    if llamacpp_found && let Ok(models) = list_openai_models(&llama_url) {
+        for model in models {
+            targets.push(BenchTarget::LlamaCpp {
+                url: llama_url.clone(),
+                model,
+            });
+        }
+    }
+
+    // Check MLX (skip if the llama-server probe already claimed this URL,
+    // e.g. both on the default port 8080)
     let mlx_url =
         std::env::var("MLX_LM_HOST").unwrap_or_else(|_| "http://localhost:8080".to_string());
-    if let Ok(models) = list_openai_models(&mlx_url) {
+    if !(llamacpp_found && mlx_url.trim_end_matches('/') == llama_url)
+        && let Ok(models) = list_openai_models(&mlx_url)
+    {
         for model in models {
             targets.push(BenchTarget::Mlx {
                 url: mlx_url.clone(),

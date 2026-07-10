@@ -23,6 +23,7 @@ use llmfit_core::hardware::SystemSpecs;
 use llmfit_core::models::ModelDatabase;
 use llmfit_core::plan::{PlanRequest, estimate_model_plan, resolve_model_selector};
 use llmfit_core::quality;
+use llmfit_core::share;
 
 fn parse_positive_usize(value: &str) -> Result<usize, String> {
     let parsed = value
@@ -784,7 +785,7 @@ AGENT USAGE:
         /// Model name to benchmark (auto-detects provider if omitted)
         model: Option<String>,
 
-        /// Provider to benchmark (auto, ollama, vllm, mlx)
+        /// Provider to benchmark (auto, ollama, vllm, mlx, llamacpp)
         #[arg(long, default_value = "auto")]
         provider: String,
 
@@ -823,6 +824,19 @@ AGENT USAGE:
         /// Skip specific models by name substring (comma-separated)
         #[arg(long)]
         skip: Option<String>,
+
+        /// Contribute results back to the project as a GitHub pull request
+        /// (no `gh` CLI required; authenticates via the GitHub device flow)
+        #[arg(long)]
+        share: bool,
+
+        /// With --share, print the submission payload and exit without contacting GitHub
+        #[arg(long)]
+        dry_run: bool,
+
+        /// With --share, skip the confirmation prompt
+        #[arg(long)]
+        yes: bool,
     },
 }
 
@@ -2003,6 +2017,7 @@ fn target_info(target: &bench::BenchTarget) -> (&str, &str, &str) {
         bench::BenchTarget::Ollama { url, model } => ("Ollama", url.as_str(), model.as_str()),
         bench::BenchTarget::VLlm { url, model } => ("vLLM", url.as_str(), model.as_str()),
         bench::BenchTarget::Mlx { url, model } => ("MLX", url.as_str(), model.as_str()),
+        bench::BenchTarget::LlamaCpp { url, model } => ("llama.cpp", url.as_str(), model.as_str()),
     }
 }
 
@@ -2018,6 +2033,7 @@ fn truncate_str(s: &str, max: usize) -> String {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn run_bench(
     model: Option<String>,
     provider: &str,
@@ -2025,6 +2041,8 @@ fn run_bench(
     runs: u32,
     all: bool,
     json: bool,
+    share_opts: Option<share::ShareOptions>,
+    overrides: &HardwareOverrides,
 ) {
     let runs = runs as usize;
 
@@ -2032,7 +2050,9 @@ fn run_bench(
     if all {
         let targets = bench::discover_all_targets();
         if targets.is_empty() {
-            eprintln!("No providers or models found. Start Ollama, vLLM, or MLX first.");
+            eprintln!(
+                "No providers or models found. Start Ollama, vLLM, MLX, or llama-server first."
+            );
             std::process::exit(1);
         }
 
@@ -2072,6 +2092,9 @@ fn run_bench(
                 bench::BenchTarget::Mlx { url, model } => {
                     bench::bench_openai_compat(url, model, "mlx", runs, &progress)
                 }
+                bench::BenchTarget::LlamaCpp { url, model } => {
+                    bench::bench_openai_compat(url, model, "llamacpp", runs, &progress)
+                }
             };
 
             if !json {
@@ -2098,6 +2121,9 @@ fn run_bench(
                 "results": results,
             });
             println!("{}", serde_json::to_string_pretty(&json_out).unwrap());
+        }
+        if let Some(opts) = share_opts {
+            share_bench_results(&results, overrides, opts);
         }
         return;
     }
@@ -2156,6 +2182,28 @@ fn run_bench(
                 model: model_name,
             }
         }
+        "llamacpp" | "llama.cpp" | "llama-server" => {
+            let url = url_override.clone().unwrap_or_else(bench::llamacpp_url);
+            match bench::detect_model_from_url(&url, model.as_deref()) {
+                Ok(model_name) => bench::BenchTarget::LlamaCpp {
+                    url,
+                    model: model_name,
+                },
+                Err(_) => {
+                    let model_name = model.unwrap_or_else(|| {
+                        eprintln!(
+                            "Error: could not detect model from llama-server at {}. Use --model",
+                            url
+                        );
+                        std::process::exit(1);
+                    });
+                    bench::BenchTarget::LlamaCpp {
+                        url,
+                        model: model_name,
+                    }
+                }
+            }
+        }
         _ => match bench::auto_detect_target(model.as_deref()) {
             Ok(t) => t,
             Err(e) => {
@@ -2189,6 +2237,9 @@ fn run_bench(
         bench::BenchTarget::Mlx { url, model } => {
             bench::bench_openai_compat(url, model, "mlx", runs, &progress)
         }
+        bench::BenchTarget::LlamaCpp { url, model } => {
+            bench::bench_openai_compat(url, model, "llamacpp", runs, &progress)
+        }
     };
 
     if !json {
@@ -2203,9 +2254,33 @@ fn run_bench(
             } else {
                 r.display();
             }
+            if let Some(opts) = share_opts {
+                share_bench_results(std::slice::from_ref(&r), overrides, opts);
+            }
         }
         Err(e) => {
             eprintln!("Error: {}", e);
+            std::process::exit(1);
+        }
+    }
+}
+
+/// Detect hardware and contribute benchmark results upstream via `share`.
+fn share_bench_results(
+    results: &[bench::BenchResult],
+    overrides: &HardwareOverrides,
+    opts: share::ShareOptions,
+) {
+    if results.is_empty() {
+        eprintln!("  Nothing to share: no successful benchmark results.");
+        return;
+    }
+    let specs = detect_specs(overrides);
+    match share::share_results(results, &specs, &opts) {
+        Ok(Some(url)) => println!("\n  Pull request opened: {url}"),
+        Ok(None) => {}
+        Err(e) => {
+            eprintln!("  Share failed: {e}");
             std::process::exit(1);
         }
     }
@@ -2282,7 +2357,9 @@ fn run_quality_bench(
     let targets: Vec<bench::BenchTarget> = if all {
         let all_targets = bench::discover_all_targets();
         if all_targets.is_empty() {
-            eprintln!("No providers or models found. Start Ollama, vLLM, or MLX first.");
+            eprintln!(
+                "No providers or models found. Start Ollama, vLLM, MLX, or llama-server first."
+            );
             std::process::exit(1);
         }
         if skip_patterns.is_empty() {
@@ -2352,6 +2429,28 @@ fn run_quality_bench(
                     model: model_name,
                 }
             }
+            "llamacpp" | "llama.cpp" | "llama-server" => {
+                let url = url_override.clone().unwrap_or_else(bench::llamacpp_url);
+                match bench::detect_model_from_url(&url, model.as_deref()) {
+                    Ok(model_name) => bench::BenchTarget::LlamaCpp {
+                        url,
+                        model: model_name,
+                    },
+                    Err(_) => {
+                        let model_name = model.unwrap_or_else(|| {
+                            eprintln!(
+                                "Error: could not detect model from llama-server at {}. Use --model",
+                                url
+                            );
+                            std::process::exit(1);
+                        });
+                        bench::BenchTarget::LlamaCpp {
+                            url,
+                            model: model_name,
+                        }
+                    }
+                }
+            }
             _ => match bench::auto_detect_target(model.as_deref()) {
                 Ok(t) => t,
                 Err(e) => {
@@ -2390,7 +2489,9 @@ fn run_quality_bench(
             bench::BenchTarget::Ollama { url, model } => {
                 quality::bench_quality_ollama(url, model, &config, rf)
             }
-            bench::BenchTarget::VLlm { url, model } | bench::BenchTarget::Mlx { url, model } => {
+            bench::BenchTarget::VLlm { url, model }
+            | bench::BenchTarget::Mlx { url, model }
+            | bench::BenchTarget::LlamaCpp { url, model } => {
                 quality::bench_quality_openai_compat(url, model, provider_name, &config, rf)
             }
         };
@@ -2905,9 +3006,12 @@ fn main() {
                 roles,
                 quality_config,
                 skip,
+                share,
+                dry_run,
+                yes,
             } => {
                 // No model/flags → launch bench TUI view
-                let is_bare = model.is_none() && !all && !json && !quality && !routing;
+                let is_bare = model.is_none() && !all && !json && !quality && !routing && !share;
                 if is_bare {
                     if let Err(e) = run_tui_bench(&overrides, context_limit, cli.api_key) {
                         eprintln!("Error running bench TUI: {}", e);
@@ -2926,7 +3030,13 @@ fn main() {
                         skip,
                     );
                 } else {
-                    run_bench(model, &provider, url, runs, all, json);
+                    let share_opts = share.then_some(share::ShareOptions {
+                        dry_run,
+                        assume_yes: yes,
+                    });
+                    run_bench(
+                        model, &provider, url, runs, all, json, share_opts, &overrides,
+                    );
                 }
             }
         }

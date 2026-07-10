@@ -2501,7 +2501,7 @@ fn docker_mr_installed_matches(installed_name: &str, candidate: &str) -> bool {
 
 /// Strip quantization suffix from a GGUF file stem.
 /// "llama-3.1-8b-instruct-q4_k_m" → "llama-3.1-8b-instruct"
-fn strip_gguf_quant_suffix(stem: &str) -> Option<String> {
+pub fn strip_gguf_quant_suffix(stem: &str) -> Option<String> {
     let quant_patterns = [
         "-q8_0", "-q6_k", "-q6_k_l", "-q5_k_m", "-q5_k_s", "-q4_k_m", "-q4_k_s", "-q4_0",
         "-q3_k_m", "-q3_k_s", "-q2_k", "-iq4_xs", "-iq3_m", "-iq2_m", "-iq1_m", "-f16", "-f32",
@@ -2689,21 +2689,25 @@ pub fn is_model_installed_llamacpp(hf_name: &str, installed: &HashSet<String>) -
         .unwrap_or(hf_name)
         .to_lowercase();
 
-    // Direct match on model name stem
+    // Direct match on model name stem. The installed set already contains
+    // both raw file stems and quant-suffix-stripped bases (see
+    // `installed_models_counted`), so exact lookups cover files like
+    // "qwen2.5-7b-instruct-q4_k_m.gguf" matched against the plain repo name.
     if installed.contains(&repo) {
         return true;
     }
 
-    // Check with common suffixes stripped
+    // Also accept a match with common variant suffixes stripped.
+    //
+    // Deliberately no substring matching here: a single "gemma-3.gguf" on
+    // disk must not mark every gemma-3-* model in the database as installed
+    // (`repo.contains("gemma-3")` is true for all of them).
     let stripped = repo
         .replace("-instruct", "")
         .replace("-chat", "")
         .replace("-hf", "")
         .replace("-it", "");
-
-    installed.iter().any(|name| {
-        name.contains(&repo) || name.contains(&stripped) || repo.contains(name.as_str())
-    })
+    installed.contains(&stripped)
 }
 
 /// Given an HF model name, return the best GGUF repo to pull from.
@@ -4076,6 +4080,34 @@ mod tests {
         let installed = HashSet::new();
         assert!(!is_model_installed_llamacpp(
             "meta-llama/Llama-3.1-8B-Instruct",
+            &installed
+        ));
+    }
+
+    #[test]
+    fn test_is_model_installed_llamacpp_no_family_false_positives() {
+        // A single "gemma-3.Q8_0.gguf" on disk yields these stems — it must
+        // mark ONLY repos actually named "gemma-3" as installed, not the
+        // whole gemma-3 family (regression: substring matching ticked every
+        // gemma-3-* model in the table).
+        let installed: HashSet<String> = ["gemma-3.q8_0", "gemma-3"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        assert!(is_model_installed_llamacpp(
+            "tiny-random/gemma-3",
+            &installed
+        ));
+        assert!(!is_model_installed_llamacpp(
+            "google/gemma-3-27b-it",
+            &installed
+        ));
+        assert!(!is_model_installed_llamacpp(
+            "google/gemma-3-4b-it",
+            &installed
+        ));
+        assert!(!is_model_installed_llamacpp(
+            "unsloth/gemma-3-270m-it",
             &installed
         ));
     }
