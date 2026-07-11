@@ -4296,8 +4296,10 @@ GPU[2]\t\t: GFX Version: \t\tgfx90c
             std::thread::current().id()
         ));
 
+        // Directory names avoid PCI-address colons — invalid in Windows
+        // filenames, and the function only cares about the tree layout.
         // xe: two tiles of 12 GiB each → 24 GiB total.
-        let xe_dev = root.join("xe/0000:03:00.0");
+        let xe_dev = root.join("xe-dev");
         std::fs::create_dir_all(xe_dev.join("tile0")).unwrap();
         std::fs::create_dir_all(xe_dev.join("tile1")).unwrap();
         let tile_bytes = (12u64 * 1024 * 1024 * 1024).to_string();
@@ -4309,7 +4311,7 @@ GPU[2]\t\t: GFX Version: \t\tgfx90c
         );
 
         // i915 discrete: lmem_total_bytes under the DRM card node.
-        let i915_dev = root.join("i915/0000:03:00.0");
+        let i915_dev = root.join("i915-dev");
         std::fs::create_dir_all(i915_dev.join("drm/card1")).unwrap();
         std::fs::write(
             i915_dev.join("drm/card1/lmem_total_bytes"),
@@ -4322,7 +4324,7 @@ GPU[2]\t\t: GFX Version: \t\tgfx90c
         );
 
         // iGPU: DRM card node exists but no VRAM files anywhere.
-        let igpu_dev = root.join("igpu/0000:00:02.0");
+        let igpu_dev = root.join("igpu-dev");
         std::fs::create_dir_all(igpu_dev.join("drm/card0")).unwrap();
         assert_eq!(
             SystemSpecs::intel_dgpu_vram_gb_from_pci_dir(&igpu_dev),
