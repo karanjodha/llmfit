@@ -1279,6 +1279,12 @@ fn run_tui_inner(
 
     let backend = ratatui::backend::CrosstermBackend::new(stdout);
     let mut terminal = ratatui::Terminal::new(backend)?;
+    // Force a full clear before the first frame: ratatui only paints the cells
+    // a frame renders and trusts EnterAlternateScreen to start from a blank
+    // screen, but some terminals (notably Windows Terminal, #732) switch to the
+    // alternate screen without clearing it, leaving the previous shell content
+    // visible underneath sparse frames.
+    terminal.clear()?;
     draw_boot_screen(&mut terminal, "Detecting system hardware...")?;
 
     // Create app state (provider detection runs in background threads)
