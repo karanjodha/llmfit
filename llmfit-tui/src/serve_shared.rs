@@ -40,6 +40,8 @@ pub fn fit_to_json(fit: &ModelFit) -> serde_json::Value {
         "parameter_count": fit.model.parameter_count,
         "params_b": round2(fit.model.params_b()),
         "context_length": fit.model.context_length,
+        "usable_context": fit.usable_context,
+        "effective_context_length": fit.effective_context_length,
         "use_case": fit.model.use_case,
         "category": fit.use_case.label(),
         "release_date": fit.model.release_date,
@@ -151,5 +153,25 @@ mod tests {
         let gpu = &json["gpus"][0];
         assert!(gpu.get("memory_bandwidth_gbps").is_some());
         assert!(gpu["memory_bandwidth_gbps"].is_null());
+    }
+
+    #[test]
+    fn fit_json_exposes_context_fields() {
+        let db = llmfit_core::models::ModelDatabase::new();
+        let model = db
+            .get_all_models()
+            .iter()
+            .find(|m| m.context_length > llmfit_core::fit::DEFAULT_ESTIMATION_CTX)
+            .expect("catalog has a model with a large context window");
+        let fit = ModelFit::analyze(model, &specs_with_gpu("Tesla T4"));
+
+        let json = fit_to_json(&fit);
+
+        assert_eq!(json["usable_context"], fit.usable_context);
+        assert_eq!(
+            json["effective_context_length"],
+            llmfit_core::fit::DEFAULT_ESTIMATION_CTX
+        );
+        assert!(fit.usable_context <= model.context_length);
     }
 }

@@ -130,6 +130,8 @@ Envelope shape:
       "parameter_count": "7B",
       "params_b": 7.0,
       "context_length": 32768,
+      "usable_context": 32768,
+      "effective_context_length": 8192,
       "use_case": "Coding",
       "category": "Coding",
       "release_date": "2025-03-14",
@@ -158,6 +160,15 @@ Envelope shape:
   ]
 }
 ```
+
+The three context fields answer different questions:
+
+- `context_length` — the model's native window, as advertised upstream.
+- `usable_context` — how much of that window actually fits in this node's
+  available memory alongside the weights. Use this one to pick a runtime `-c`.
+- `effective_context_length` — the context the `memory_required_gb` and
+  `estimated_tps` figures on this row were computed at. Defaults to
+  `min(context_length, 8192)`; set by `max_context` when supplied.
 
 ---
 
