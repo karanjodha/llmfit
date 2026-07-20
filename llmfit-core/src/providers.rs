@@ -595,6 +595,18 @@ fn is_likely_gguf_repo(repo_lower: &str) -> bool {
     repo_lower.contains("-gguf") || repo_lower.ends_with("gguf")
 }
 
+/// Detect repos whose name marks a pre-quantized non-MLX format (AWQ, GPTQ,
+/// AutoRound). These are vLLM/CUDA formats: guessing an `mlx-community`
+/// equivalent for them almost always fabricates a repo that does not exist
+/// (issue #294). A name that also carries an MLX marker (e.g. an
+/// mlx-community conversion that keeps "AWQ" in its name) is not excluded —
+/// callers check MLX markers first.
+pub fn is_likely_prequantized_repo(repo_lower: &str) -> bool {
+    ["awq", "gptq", "autoround", "auto-round"]
+        .iter()
+        .any(|marker| repo_lower.contains(marker))
+}
+
 /// Scan HuggingFace cache directories for MLX model directories.
 fn scan_hf_cache_for_mlx() -> HashSet<String> {
     let mut set = HashSet::new();
@@ -737,11 +749,7 @@ impl ModelProvider for MlxProvider {
     }
 
     fn start_pull(&self, model_tag: &str) -> Result<PullHandle, String> {
-        let repo_id = if model_tag.contains('/') {
-            model_tag.to_string()
-        } else {
-            format!("mlx-community/{}", model_tag)
-        };
+        let repo_id = resolve_mlx_fallback_repo(model_tag, &hf_repo_exists)?;
         let repo_for_thread = repo_id.clone();
         let (tx, rx) = std::sync::mpsc::channel();
 
@@ -3369,6 +3377,47 @@ pub fn mlx_pull_tag(hf_name: &str) -> String {
         })
 }
 
+/// Resolve the repo id an MLX pull should download, guarding the
+/// `mlx-community/{tag}` fallback (issue #294).
+///
+/// An explicit `owner/name` tag is trusted as typed. A bare tag is a guess:
+/// llmfit assumes an `mlx-community` equivalent exists. Before that guess is
+/// handed to `hf download` we (a) refuse names that mark a pre-quantized
+/// non-MLX format (AWQ/GPTQ/AutoRound have no fabricated MLX twin), and
+/// (b) verify the guessed repo actually exists, so the user gets a clear
+/// error instead of a "Model not found" pull failure against a repo llmfit
+/// invented.
+///
+/// `repo_exists` is injected so tests don't hit the network.
+fn resolve_mlx_fallback_repo(
+    model_tag: &str,
+    repo_exists: &dyn Fn(&str) -> bool,
+) -> Result<String, String> {
+    if model_tag.contains('/') {
+        return Ok(model_tag.to_string());
+    }
+
+    let tag_lower = model_tag.to_lowercase();
+    let has_mlx_marker = tag_lower.contains("mlx");
+    if !has_mlx_marker && is_likely_prequantized_repo(&tag_lower) {
+        return Err(format!(
+            "{model_tag} looks like a pre-quantized AWQ/GPTQ repo — that's a vLLM/CUDA \
+             format, not MLX, and there is no mlx-community equivalent to guess. If an \
+             MLX build of this model exists, pass its full repo id (owner/name)."
+        ));
+    }
+
+    let candidate = format!("mlx-community/{model_tag}");
+    if !repo_exists(&candidate) {
+        return Err(format!(
+            "No MLX build found: {candidate} does not exist on Hugging Face (or could not \
+             be reached). If an MLX build exists under a different name, pass its full \
+             repo id (owner/name)."
+        ));
+    }
+    Ok(candidate)
+}
+
 // ---------------------------------------------------------------------------
 // Ollama name-matching helpers
 // ---------------------------------------------------------------------------
@@ -4693,6 +4742,65 @@ mod tests {
     fn test_mlx_pull_tag_fallback() {
         let tag = mlx_pull_tag("SomeUnknown/Model-7B");
         assert!(!tag.is_empty());
+    }
+
+    // ── resolve_mlx_fallback_repo (issue #294) ───────────────────────
+
+    #[test]
+    fn test_resolve_mlx_explicit_repo_passes_through_unverified() {
+        // An explicit owner/name is trusted as typed — no existence probe.
+        let repo = resolve_mlx_fallback_repo("mlx-community/Qwen3-8B-4bit", &|_: &str| {
+            panic!("explicit repo ids must not be probed")
+        });
+        assert_eq!(repo.unwrap(), "mlx-community/Qwen3-8B-4bit");
+    }
+
+    #[test]
+    fn test_resolve_mlx_fallback_verified_when_repo_exists() {
+        let repo = resolve_mlx_fallback_repo("qwen3-8b-4bit", &|r: &str| {
+            r == "mlx-community/qwen3-8b-4bit"
+        });
+        assert_eq!(repo.unwrap(), "mlx-community/qwen3-8b-4bit");
+    }
+
+    #[test]
+    fn test_resolve_mlx_fallback_errors_when_repo_missing() {
+        let err = resolve_mlx_fallback_repo("qwen3-30b-a3b-instruct-2507-4bit", &|_: &str| false)
+            .unwrap_err();
+        assert!(
+            err.contains("mlx-community/qwen3-30b-a3b-instruct-2507-4bit"),
+            "error should name the guessed repo, got: {err}"
+        );
+    }
+
+    #[test]
+    fn test_resolve_mlx_fallback_refuses_awq_tag() {
+        // The #294 shape: an AWQ repo name with no MLX marker must be
+        // refused before any network probe or download starts.
+        let err = resolve_mlx_fallback_repo("qwen3-30b-a3b-instruct-2507-awq-4bit", &|_: &str| {
+            panic!("prequantized tags must be refused before probing")
+        })
+        .unwrap_err();
+        assert!(err.contains("AWQ/GPTQ"), "got: {err}");
+    }
+
+    #[test]
+    fn test_resolve_mlx_fallback_allows_awq_named_mlx_conversion() {
+        // mlx-community conversions sometimes keep "AWQ" in the name; an MLX
+        // marker wins over the prequantized marker (existence still checked).
+        let repo = resolve_mlx_fallback_repo("qwen3-8b-awq-mlx-4bit", &|_: &str| true);
+        assert_eq!(repo.unwrap(), "mlx-community/qwen3-8b-awq-mlx-4bit");
+    }
+
+    #[test]
+    fn test_is_likely_prequantized_repo() {
+        assert!(is_likely_prequantized_repo(
+            "qwen3-30b-a3b-instruct-2507-awq-4bit"
+        ));
+        assert!(is_likely_prequantized_repo("model-gptq-int4"));
+        assert!(is_likely_prequantized_repo("model-autoround-4bit"));
+        assert!(!is_likely_prequantized_repo("qwen3-8b-4bit"));
+        assert!(!is_likely_prequantized_repo("llama-3.1-8b-instruct"));
     }
 
     // ── ollama_installed_matches_candidate ────────────────────────────

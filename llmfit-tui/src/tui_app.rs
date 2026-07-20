@@ -4085,7 +4085,12 @@ impl App {
         let is_mlx_model = fit.model.is_mlx_model();
         let has_catalog_gguf = !fit.model.gguf_sources.is_empty();
 
-        let download_options = self.available_download_providers(&model_name, has_catalog_gguf);
+        let download_options = self.available_download_providers(
+            &model_name,
+            model_format,
+            is_mlx_model,
+            has_catalog_gguf,
+        );
         if !download_options.is_empty() {
             self.open_download_provider_popup(model_name, download_options);
         } else {
@@ -4350,6 +4355,8 @@ impl App {
     fn available_download_providers(
         &self,
         model_name: &str,
+        model_format: llmfit_core::models::ModelFormat,
+        is_mlx_model: bool,
         has_catalog_gguf: bool,
     ) -> Vec<DownloadProvider> {
         let mut providers_for_model = Vec::new();
@@ -4358,7 +4365,13 @@ impl App {
         {
             providers_for_model.push(DownloadProvider::Ollama);
         }
-        if self.mlx_available {
+        // AWQ/GPTQ/AutoRound are vLLM/CUDA formats with no MLX equivalent to
+        // guess — offering MLX for them fabricates a nonexistent
+        // mlx-community repo (issue #294). Scanned HF models default to
+        // ModelFormat::Gguf, so the name is checked as well as the format.
+        let prequantized = model_format.is_prequantized()
+            || providers::is_likely_prequantized_repo(&model_name.to_lowercase());
+        if self.mlx_available && (is_mlx_model || !prequantized) {
             providers_for_model.push(DownloadProvider::Mlx);
         }
         // Check catalog gguf_sources first (no HTTP probe needed), then
@@ -5102,6 +5115,68 @@ mod tests {
             estimate_basis: Default::default(),
             measured_tps: None,
         }
+    }
+
+    // ── available_download_providers MLX gating (issue #294) ─────────
+
+    fn mlx_only_app() -> App {
+        let mut app = test_app();
+        app.mlx_available = true;
+        // Keep every other provider off so no network probe runs and the
+        // returned options are exactly the MLX decision.
+        app.ollama_available = false;
+        app.ollama_binary_available = false;
+        app.llamacpp_available = false;
+        app.docker_mr_available = false;
+        app.lmstudio_available = false;
+        app.vllm_available = false;
+        app
+    }
+
+    #[test]
+    fn awq_named_model_is_not_offered_mlx_download() {
+        let app = mlx_only_app();
+        // The #294 model: format comes back as the Gguf default for scanned
+        // HF models, so the name heuristic must catch it.
+        let options = app.available_download_providers(
+            "cyankiwi/Qwen3-30B-A3B-Instruct-2507-AWQ-4bit",
+            ModelFormat::Gguf,
+            false,
+            true,
+        );
+        assert!(options.is_empty(), "got: {options:?}");
+    }
+
+    #[test]
+    fn awq_format_model_is_not_offered_mlx_download() {
+        let app = mlx_only_app();
+        let options =
+            app.available_download_providers("some/quantized-model", ModelFormat::Awq, false, true);
+        assert!(options.is_empty(), "got: {options:?}");
+    }
+
+    #[test]
+    fn plain_model_is_offered_mlx_download() {
+        let app = mlx_only_app();
+        let options = app.available_download_providers(
+            "meta-llama/Llama-3.1-8B-Instruct",
+            ModelFormat::Gguf,
+            false,
+            true,
+        );
+        assert_eq!(options, vec![DownloadProvider::Mlx]);
+    }
+
+    #[test]
+    fn mlx_conversion_keeping_awq_in_name_is_still_offered() {
+        let app = mlx_only_app();
+        let options = app.available_download_providers(
+            "mlx-community/Qwen3-30B-A3B-Instruct-2507-AWQ-4bit-MLX",
+            ModelFormat::Gguf,
+            true,
+            true,
+        );
+        assert_eq!(options, vec![DownloadProvider::Mlx]);
     }
 
     #[test]
