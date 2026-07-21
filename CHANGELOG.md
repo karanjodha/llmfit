@@ -1,5 +1,19 @@
 # Changelog
 
+## [1.1.6](https://github.com/AlexsJones/llmfit/compare/v1.1.5...v1.1.6) (2026-07-21)
+
+
+### Features
+
+* **tui:** [SIMULATED] GPU indicator and / search in the community leaderboard ([7584ce8](https://github.com/AlexsJones/llmfit/commit/7584ce803539dba79c8cb640079ee5bb26490420))
+* **tui:** [SIMULATED] GPU indicator and / search in the community leaderboard ([c3bcb14](https://github.com/AlexsJones/llmfit/commit/c3bcb1414543fbffe06ea67669de76491da3c548))
+
+
+### Bug Fixes
+
+* **tui:** let plan-mode text fields accept q/j/k instead of treating them as bindings ([7b8491f](https://github.com/AlexsJones/llmfit/commit/7b8491f6d6c3c2238dcb0ddda4bcf798a2f13b2a)), closes [#781](https://github.com/AlexsJones/llmfit/issues/781)
+* **tui:** plan-mode text fields no longer treat q/j/k as bindings ([cac6b58](https://github.com/AlexsJones/llmfit/commit/cac6b5894670ecfb9f1d9b5b0c1e9d69c32e88f6))
+
 ## [1.1.5](https://github.com/AlexsJones/llmfit/compare/v1.1.4...v1.1.5) (2026-07-20)
 
 
