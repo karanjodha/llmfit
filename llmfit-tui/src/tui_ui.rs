@@ -439,27 +439,27 @@ fn draw_search_and_filters(frame: &mut Frame, app: &App, area: Rect, tc: &ThemeC
         Style::default().fg(tc.accent_secondary)
     } else {
         match app.input_mode {
-        InputMode::Search => Style::default().fg(tc.accent_secondary),
-        InputMode::Normal
-        | InputMode::Plan
-        | InputMode::ProviderPopup
-        | InputMode::UseCasePopup
-        | InputMode::CapabilityPopup
-        | InputMode::DownloadProviderPopup
-        | InputMode::Visual
-        | InputMode::Select
-        | InputMode::QuantPopup
-        | InputMode::RunModePopup
-        | InputMode::ParamsBucketPopup
-        | InputMode::LicensePopup
-        | InputMode::RuntimePopup
-        | InputMode::HelpPopup
-        | InputMode::Simulation
-        | InputMode::AdvancedConfig
-        | InputMode::DownloadManager
-        | InputMode::FilterPopup
-        | InputMode::Benchmarks
-        | InputMode::BenchOffer => Style::default().fg(tc.muted),
+            InputMode::Search => Style::default().fg(tc.accent_secondary),
+            InputMode::Normal
+            | InputMode::Plan
+            | InputMode::ProviderPopup
+            | InputMode::UseCasePopup
+            | InputMode::CapabilityPopup
+            | InputMode::DownloadProviderPopup
+            | InputMode::Visual
+            | InputMode::Select
+            | InputMode::QuantPopup
+            | InputMode::RunModePopup
+            | InputMode::ParamsBucketPopup
+            | InputMode::LicensePopup
+            | InputMode::RuntimePopup
+            | InputMode::HelpPopup
+            | InputMode::Simulation
+            | InputMode::AdvancedConfig
+            | InputMode::DownloadManager
+            | InputMode::FilterPopup
+            | InputMode::Benchmarks
+            | InputMode::BenchOffer => Style::default().fg(tc.muted),
         }
     };
 
